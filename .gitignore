@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Data & Secrets
+.env
+data/
+session.db
+logs/
+
+# Docker
+docker-compose.override.yml

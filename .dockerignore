@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+.git
+.gitignore
+
+data/
+session.db
+
+docker-compose.yml
+Dockerfile
+Gemini.md

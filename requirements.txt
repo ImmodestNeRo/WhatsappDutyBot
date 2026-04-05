@@ -1,0 +1,6 @@
+neonize
+pytz
+apscheduler
+segno
+protobuf
+python-dotenv

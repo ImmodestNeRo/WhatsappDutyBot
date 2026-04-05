@@ -1,0 +1,28 @@
+version: '3.9'
+
+services:
+  bot:
+    build: .
+    container_name: duty-bot
+
+    restart: always
+
+    # Load .env into the container
+    env_file:
+      - .env
+
+    # важливо для логів
+    environment:
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      # дані (КРИТИЧНО — session.db тут!)
+      - ./data:/app/data
+
+      # код для dev (можеш закоментити в проді)
+      - ./main.py:/app/main.py
+      - ./config.py:/app/config.py
+      - ./services:/app/services
+
+    stdin_open: true
+    tty: true
