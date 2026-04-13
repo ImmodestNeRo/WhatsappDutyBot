@@ -52,6 +52,10 @@ class BotConfig:
     schedule_end_of_day: str = field(default_factory=lambda: _env("SCHEDULE_END_OF_DAY", "23:59"))
 
 
+    # ── Queue constraints ──────────────────────────────────
+    # Phone number that must always remain last in the queue.
+    queue_always_last: str = field(default_factory=lambda: _env("QUEUE_ALWAYS_LAST", ""))
+
     # ── History-sync grace period (seconds) ────────────────
     history_sync_grace: int = field(default_factory=lambda: _env_int("HISTORY_SYNC_GRACE", 60))
     # ── Logging ────────────────────────────────────────────

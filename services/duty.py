@@ -53,6 +53,7 @@ class DutyManager:
 
         # Auto-bind group from .env if not yet persisted
         self._auto_bind_group()
+        self._enforce_queue_constraints()
 
     # ── Migration ──────────────────────────────────────────
 
@@ -108,6 +109,20 @@ class DutyManager:
             self.state.update(_mut)
             logger.info("Auto-bound to group %s from config.", env_jid)
 
+    def _enforce_queue_constraints(self) -> None:
+        """Move QUEUE_ALWAYS_LAST to the end if it's not already there."""
+        always_last = config.queue_always_last
+        if not always_last:
+            return
+        st = self.state.read()
+        queue = st.get("queue", [])
+        if always_last in queue and queue[-1] != always_last:
+            def _mut(s: dict) -> None:
+                s["queue"].remove(always_last)
+                s["queue"].append(always_last)
+            self.state.update(_mut)
+            logger.info("Queue constraint applied: %s moved to end.", always_last)
+
     # ── Date helpers ───────────────────────────────────────
 
     @staticmethod
@@ -137,18 +152,22 @@ class DutyManager:
 
     def add_to_queue(self, user_base: str) -> bool:
         added = False
+        always_last = config.queue_always_last
         def _mut(st: dict) -> None:
             nonlocal added
             if user_base not in st["queue"]:
                 st["queue"].append(user_base)
                 added = True
+            if always_last and always_last in st["queue"] and st["queue"][-1] != always_last:
+                st["queue"].remove(always_last)
+                st["queue"].append(always_last)
         self.state.update(_mut)
         return added
 
     def get_queue(self) -> list[str]:
         return self.state.read().get("queue", [])
 
-    def get_queue_with_dates(self, limit: int = 10) -> list[dict]:
+    def get_queue_with_dates(self, limit: int | None = 10) -> list[dict]:
         """Calculates dates for the next users in the queue, skipping Sundays."""
         queue = self.get_queue()
         if not queue:
@@ -160,7 +179,7 @@ class DutyManager:
 
         days_ukr = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 
-        for i, user in enumerate(queue[:limit]):
+        for i, user in enumerate(queue if limit is None else queue[:limit]):
             if current_date.weekday() == 6:
                 current_date += timedelta(days=1)
 
@@ -195,6 +214,8 @@ class DutyManager:
         st = self.state.read()
         logger.info("confirm_duty: current_duty=%r caller=%r", st.get("current_duty"), user_base)
         if st.get("current_duty") == user_base:
+            if st.get("confirmed_today"):
+                return False, msg.DUTY_ALREADY_CONFIRMED
             def _mut(s: dict) -> None:
                 s["confirmed_today"] = True
             self.state.update(_mut)

@@ -15,3 +15,8 @@ logs/
 
 # Docker
 docker-compose.override.yml
+
+# Internal / tooling
+.claude/
+Gemini.md
+to_do.md

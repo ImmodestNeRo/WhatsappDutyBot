@@ -48,6 +48,7 @@ class WhatsAppClient:
             "/add":        self._cmd_add,
             "/remove":     self._cmd_remove,
             "/list":       self._cmd_list,
+            "/longlist":   self._cmd_longlist,
             "/guilty":     self._cmd_guilty,
             "/done":       self._cmd_done,
         }
@@ -292,6 +293,18 @@ class WhatsAppClient:
 
     def _cmd_list(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         queue_data = self.duty_manager.get_queue_with_dates(limit=10)
+        if not queue_data:
+            self.send_text(chat_jid, msg.QUEUE_EMPTY)
+        else:
+            lines = []
+            for item in queue_data:
+                prefix = "✅ " if item["is_today"] else "— "
+                suffix = " (Сьогодні)" if item["is_today"] else ""
+                lines.append(f"{item['day']} ({item['date']}) {prefix}@{item['user']}{suffix}")
+            self.send_text(chat_jid, f"{msg.QUEUE_HEADER}\n" + "\n".join(lines))
+
+    def _cmd_longlist(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        queue_data = self.duty_manager.get_queue_with_dates(limit=None)
         if not queue_data:
             self.send_text(chat_jid, msg.QUEUE_EMPTY)
         else:

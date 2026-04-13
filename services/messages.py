@@ -34,6 +34,7 @@ GUILTY_EMPTY = "Шкодників немає. 🎉"
 GUILTY_HEADER = "Список шкодників:"
 
 DUTY_CONFIRMED = "✅ Чергування підтверджено!"
+DUTY_ALREADY_CONFIRMED = "Ви вже відчергували сьогодні."
 NOT_YOUR_DUTY = "Ви не є черговим сьогодні."
 SUNDAY_NO_DUTY = "Сьогодні неділя, вихідний."
 

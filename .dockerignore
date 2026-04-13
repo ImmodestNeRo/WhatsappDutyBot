@@ -10,12 +10,10 @@ env/
 .env
 .git
 .gitignore
+.claude/
 
 data/
 session.db
 
-docker-compose.yml
-Dockerfile
 Gemini.md
 to_do.md
-*.md
