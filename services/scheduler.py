@@ -69,7 +69,7 @@ class BotScheduler:
                 logger.info("Morning announcement for user %s in group %s", user, gid)
                 self.wa.send_done_button(gid, text)
             else:
-                logger.warning("Morning job: start_day() returned None (Sunday or empty queue?).")
+                logger.info("Morning job: start_day() skipped (Sunday, already ran today, or empty queue).")
         except Exception as exc:
             logger.error("Error in morning job: %s", exc, exc_info=True)
 

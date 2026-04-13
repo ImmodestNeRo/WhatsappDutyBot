@@ -21,4 +21,7 @@ COPY . .
 
 RUN mkdir -p /app/data
 
-CMD ["python", "main.py"]
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]
