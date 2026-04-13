@@ -4,6 +4,7 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
+ENV DATA_DIR=/app/data
 
 # system deps
 RUN apt-get update && apt-get install -y \
@@ -13,10 +14,11 @@ RUN apt-get update && apt-get install -y \
 
 # install deps окремим шаром (для кешу)
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
 # копіюємо код (після deps)
 COPY . .
+
+RUN mkdir -p /app/data
 
 CMD ["python", "main.py"]

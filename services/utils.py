@@ -61,6 +61,8 @@ def get_logger(name: str) -> logging.Logger:
 
 def with_retry(max_retries: int = 3, delay: float = 5.0) -> Callable[[F], F]:
     """Retry decorator for transient (network) failures."""
+    if max_retries < 1:
+        raise ValueError("max_retries must be >= 1")
     _logger = get_logger("retry")
 
     def decorator(func: F) -> F:

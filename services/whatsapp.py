@@ -1,10 +1,9 @@
 """
 WhatsApp client: event handling, message parsing, command dispatch.
 
-Key improvements:
 - History-sync grace period is configurable (default 60 s).
 - client_jid resolved eagerly in on_connected(), not lazily.
-- Bare ``except: pass`` replaced with specific catches.
+- Commands registered in a dict — adding a new command = one new method.
 - All user-facing strings come from ``messages.py``.
 """
 
@@ -12,13 +11,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import segno
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, DisconnectedEv, MessageEv, QREv
 import neonize.proto.waE2E.WAWebProtobufsE2E_pb2 as pb
 import neonize.proto.Neonize_pb2 as neonize_pb
+from neonize.utils.enum import VoteType
 
 from config import config
 from .duty import DutyManager
@@ -34,12 +34,23 @@ class WhatsAppClient:
         self.client = NewClient(config.session_db_path)
         self.client_jid: Optional[str] = None
         self.boot_time: int = int(time.time())
+        self.on_ready: Optional[Callable] = None
 
         # Register core events
         self.client.event(MessageEv)(self.on_message)
         self.client.event(QREv)(self.on_qr)
         self.client.event(ConnectedEv)(self.on_connected)
         self.client.event(DisconnectedEv)(self.on_disconnected)
+
+        # Command dispatch table
+        self._handlers: dict[str, Callable] = {
+            "/bind_group": self._cmd_bind_group,
+            "/add":        self._cmd_add,
+            "/remove":     self._cmd_remove,
+            "/list":       self._cmd_list,
+            "/guilty":     self._cmd_guilty,
+            "/done":       self._cmd_done,
+        }
 
     # ── Event handlers ─────────────────────────────────────
 
@@ -53,7 +64,6 @@ class WhatsAppClient:
 
     def on_connected(self, client: NewClient, event: ConnectedEv) -> None:
         logger.info("WhatsApp connected successfully.")
-        # Resolve own JID eagerly so anti-loop works from the first message
         try:
             me = client.get_me()
             if me:
@@ -63,6 +73,13 @@ class WhatsAppClient:
                     logger.info("Own JID resolved: %s", self.client_jid)
         except Exception as exc:
             logger.warning("Could not resolve own JID: %s", exc)
+
+        if self.on_ready:
+            try:
+                self.on_ready()
+                self.on_ready = None  # fire once only
+            except Exception as exc:
+                logger.error("Catch-up error: %s", exc, exc_info=True)
 
     def on_disconnected(self, client: NewClient, event: DisconnectedEv) -> None:
         logger.warning("WhatsApp session disconnected!")
@@ -91,7 +108,6 @@ class WhatsAppClient:
         Returns the phone string on success, or None if it can't resolve.
         """
         if sender_server != "lid":
-            # Already a phone-number based JID
             return sender_user
         try:
             lid_jid = self._parse_jid(f"{sender_user}@{sender_server}")
@@ -114,27 +130,10 @@ class WhatsAppClient:
 
     @with_retry(max_retries=3)
     def send_done_button(self, jid: str, text_content: str) -> None:
-        logger.info("Sending interactive button to %s", jid)
-        btn = pb.InteractiveMessage.NativeFlowMessage.NativeFlowButton(
-            name="quick_reply",
-            buttonParamsJSON=json.dumps(
-                {"display_text": msg.BUTTON_CONFIRM, "id": "cmd_done"},
-                ensure_ascii=False,
-            ),
-        )
-        message = pb.Message(
-            viewOnceMessage=pb.FutureProofMessage(
-                message=pb.Message(
-                    interactiveMessage=pb.InteractiveMessage(
-                        body=pb.InteractiveMessage.Body(text=text_content),
-                        nativeFlowMessage=pb.InteractiveMessage.NativeFlowMessage(
-                            buttons=[btn],
-                        ),
-                    )
-                )
-            )
-        )
-        self.client.send_message(self._parse_jid(jid), message)
+        """Send a plain text message instructing the user to use /done."""
+        logger.info("Sending simple text notification to %s", jid)
+        message = f"{text_content}\n\n👉 Напишіть /done коли закінчите."
+        self.send_text(jid, message)
 
     # ── Incoming message handler ───────────────────────────
 
@@ -150,9 +149,8 @@ class WhatsAppClient:
             sender = getattr(ms, "Sender", None)
 
             chat_jid = f"{chat.User}@{chat.Server}"
-            sender_jid = f"{sender.User}@{sender.Server}"
 
-            self._dispatch_command(text, chat_jid, sender)
+            self._dispatch_command(text, chat_jid, sender, message)
 
         except Exception as exc:
             logger.error("Error handling message: %s", exc, exc_info=True)
@@ -212,61 +210,116 @@ class WhatsAppClient:
                     except (json.JSONDecodeError, KeyError) as exc:
                         logger.debug("Failed to parse button response: %s", exc)
 
+        # Poll response fallback
+        if not text:
+            poll_update = getattr(raw_msg, "pollUpdateMessage", None)
+            if poll_update:
+                logger.info("Received a poll vote! Interpreting as confirmation.")
+                text = "/done"
+
         return text if text else None
 
-    def _dispatch_command(self, text: str, chat_jid: str, sender: object) -> None:
+    def _get_user_from_command(self, text: str, message: MessageEv) -> Optional[str]:
+        """
+        Extracts a phone number from the command, either from a mention
+        or from a direct numeric string.
+        """
+        # 1. Check for mentions in contextInfo
+        try:
+            raw_msg = getattr(message, "Message", None)
+            ext = getattr(raw_msg, "extendedTextMessage", None)
+            if ext and ext.contextInfo and ext.contextInfo.mentionedJid:
+                mention_jid = ext.contextInfo.mentionedJid[0]
+                parts = mention_jid.split("@")
+                user = parts[0]
+                server = parts[1] if len(parts) > 1 else "s.whatsapp.net"
+                return self._resolve_phone(user, server)
+        except Exception as exc:
+            logger.debug("Failed to extract mention: %s", exc)
+
+        # 2. Check for manual phone number in text
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) >= 2:
+            phone = parts[1].strip().lstrip("+").replace("-", "").replace(" ", "")
+            if phone.isdigit() and len(phone) >= 10:
+                return phone
+
+        return None
+
+    # ── Command dispatch ───────────────────────────────────
+
+    def _dispatch_command(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         """Route a text command to the appropriate handler."""
+        parts = text.strip().split(maxsplit=1)
+        if not parts:
+            return
+        handler = self._handlers.get(parts[0])
+        if handler:
+            handler(text, chat_jid, sender, message)
+
+    # ── Command handlers ───────────────────────────────────
+
+    def _cmd_bind_group(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        self.duty_manager.bind_group(chat_jid)
+        self.send_text(chat_jid, msg.GROUP_BOUND)
+
+    def _cmd_add(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        phone = self._get_user_from_command(text, message)
+
+        if not phone:
+            sender_user: str = getattr(sender, "User", "")
+            sender_server: str = getattr(sender, "Server", "s.whatsapp.net")
+            phone = self._resolve_phone(sender_user, sender_server)
+
+        if phone:
+            if self.duty_manager.add_to_queue(phone):
+                self.send_text(chat_jid, msg.ADDED_TO_QUEUE)
+            else:
+                self.send_text(chat_jid, msg.ALREADY_IN_QUEUE)
+        else:
+            self.send_text(chat_jid, msg.ADD_USAGE)
+
+    def _cmd_remove(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        phone = self._get_user_from_command(text, message)
+
+        if phone:
+            if self.duty_manager.remove_from_queue(phone):
+                self.send_text(chat_jid, msg.REMOVED_FROM_QUEUE.format(user=phone))
+            else:
+                self.send_text(chat_jid, msg.NOT_IN_QUEUE.format(user=phone))
+        else:
+            self.send_text(chat_jid, msg.REMOVE_USAGE)
+
+    def _cmd_list(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        queue_data = self.duty_manager.get_queue_with_dates(limit=10)
+        if not queue_data:
+            self.send_text(chat_jid, msg.QUEUE_EMPTY)
+        else:
+            lines = []
+            for item in queue_data:
+                prefix = "✅ " if item["is_today"] else "— "
+                suffix = " (Сьогодні)" if item["is_today"] else ""
+                lines.append(f"{item['day']} ({item['date']}) {prefix}@{item['user']}{suffix}")
+            self.send_text(chat_jid, f"{msg.QUEUE_HEADER}\n" + "\n".join(lines))
+
+    def _cmd_guilty(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        records = self.duty_manager.get_guilty()
+        if not records:
+            self.send_text(chat_jid, msg.GUILTY_EMPTY)
+        else:
+            lines = [f"{r['date']}: @{r['user']}" for r in records]
+            self.send_text(chat_jid, f"{msg.GUILTY_HEADER}\n" + "\n".join(lines))
+
+    def _cmd_done(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         sender_user: str = getattr(sender, "User", "")
-
-        if text.startswith("/bind_group"):
-            self.duty_manager.bind_group(chat_jid)
-            self.send_text(chat_jid, msg.GROUP_BOUND)
-
-        elif text.startswith("/add"):
-            parts = text.strip().split(maxsplit=1)
-
-            if len(parts) >= 2:
-                # Manual mode: /add 380663644854
-                phone = parts[1].strip().lstrip("+").replace("-", "").replace(" ", "")
-                if not phone.isdigit() or len(phone) < 10:
-                    self.send_text(chat_jid, msg.ADD_INVALID_PHONE)
-                elif self.duty_manager.add_to_queue(phone):
-                    self.send_text(chat_jid, msg.ADDED_TO_QUEUE)
-                else:
-                    self.send_text(chat_jid, msg.ALREADY_IN_QUEUE)
-            else:
-                # Auto mode: try to resolve sender JID → phone number
-                sender_server: str = getattr(sender, "Server", "s.whatsapp.net")
-                phone = self._resolve_phone(sender_user, sender_server)
-
-                if phone:
-                    if self.duty_manager.add_to_queue(phone):
-                        self.send_text(chat_jid, msg.ADDED_TO_QUEUE)
-                    else:
-                        self.send_text(chat_jid, msg.ALREADY_IN_QUEUE)
-                else:
-                    # LID could not be resolved — ask user to provide number manually
-                    self.send_text(chat_jid, msg.ADD_USAGE)
-
-        elif text.startswith("/list"):
-            queue = self.duty_manager.get_queue()
-            if not queue:
-                self.send_text(chat_jid, msg.QUEUE_EMPTY)
-            else:
-                lines = [f"@{u}" for u in queue]
-                self.send_text(chat_jid, f"{msg.QUEUE_HEADER}\n" + "\n".join(lines))
-
-        elif text.startswith("/guilty"):
-            records = self.duty_manager.get_guilty()
-            if not records:
-                self.send_text(chat_jid, msg.GUILTY_EMPTY)
-            else:
-                lines = [f"{r['date']}: @{r['user']}" for r in records]
-                self.send_text(chat_jid, f"{msg.GUILTY_HEADER}\n" + "\n".join(lines))
-
-        elif text.startswith("/done"):
-            success, response_text = self.duty_manager.confirm_duty(sender_user)
-            self.send_text(chat_jid, response_text)
+        sender_server: str = getattr(sender, "Server", "s.whatsapp.net")
+        caller_phone = self._resolve_phone(sender_user, sender_server) or sender_user
+        logger.info(
+            "/done: sender_user=%s server=%s resolved_phone=%s",
+            sender_user, sender_server, caller_phone,
+        )
+        success, response_text = self.duty_manager.confirm_duty(caller_phone)
+        self.send_text(chat_jid, response_text)
 
     # ── Connection ─────────────────────────────────────────
 

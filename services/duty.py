@@ -1,18 +1,20 @@
 """
 Duty queue business logic.
 
-Key improvements over the original:
 - ``start_day`` and ``rotate_and_penalize`` check ``last_start_date`` /
   ``last_rotation_date`` to avoid double-firing after a restart.
-- ``rotate_and_penalize`` is atomic — reads all state, computes changes,
-  writes everything in one batch.
+- ``rotate_and_penalize`` is fully atomic — single SafeJSONStorage.update()
+  covers penalize + rotate + reset in one lock/fsync.
+- All state lives in one ``bot_state.json``; legacy 3-file layout is
+  auto-migrated on first run.
 - GROUP_JID can be seeded from config on first run.
 """
 
 from __future__ import annotations
 
+import json as _json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pytz
@@ -26,33 +28,72 @@ logger = get_logger("DutyManager")
 
 TZ = pytz.timezone(config.timezone)
 
+_DEFAULT_STATE: dict = {
+    "queue": [],
+    "guilty_records": [],
+    "current_duty": None,
+    "confirmed_today": False,
+    "last_rotation_date": None,
+    "last_start_date": None,
+    "group_jid": None,
+}
+
 
 class DutyManager:
     def __init__(self, data_dir: str | None = None) -> None:
         data_dir = data_dir or config.data_dir
         os.makedirs(data_dir, exist_ok=True)
 
-        self.duty_list = SafeJSONStorage(
-            os.path.join(data_dir, "duty_list.json"),
-            {"queue": []},
-        )
-        self.guilty = SafeJSONStorage(
-            os.path.join(data_dir, "guilty.json"),
-            {"records": []},
-        )
-        self.runtime_state = SafeJSONStorage(
-            os.path.join(data_dir, "runtime_state.json"),
-            {
-                "current_duty": None,
-                "last_rotation_date": None,
-                "last_start_date": None,
-                "confirmed_today": False,
-                "group_jid": None,
-            },
+        self._maybe_migrate(data_dir)
+
+        self.state = SafeJSONStorage(
+            os.path.join(data_dir, "bot_state.json"),
+            dict(_DEFAULT_STATE),
         )
 
         # Auto-bind group from .env if not yet persisted
         self._auto_bind_group()
+
+    # ── Migration ──────────────────────────────────────────
+
+    def _maybe_migrate(self, data_dir: str) -> None:
+        """Merge legacy 3-file layout into bot_state.json on first run."""
+        new_path = os.path.join(data_dir, "bot_state.json")
+        if os.path.exists(new_path):
+            return
+
+        merged = dict(_DEFAULT_STATE)
+
+        for fname, mapping in [
+            ("duty_list.json",    {"queue": "queue"}),
+            ("guilty.json",       {"records": "guilty_records"}),
+            ("runtime_state.json", {
+                "current_duty":       "current_duty",
+                "confirmed_today":    "confirmed_today",
+                "last_rotation_date": "last_rotation_date",
+                "last_start_date":    "last_start_date",
+                "group_jid":          "group_jid",
+            }),
+        ]:
+            path = os.path.join(data_dir, fname)
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = _json.load(f)
+                for old_key, new_key in mapping.items():
+                    if old_key in data:
+                        merged[new_key] = data[old_key]
+            except Exception as exc:
+                logger.warning("Migration: could not read %s: %s", fname, exc)
+
+        tmp = new_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(merged, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, new_path)
+        logger.info("Migrated legacy files to bot_state.json")
 
     # ── Auto-binding ───────────────────────────────────────
 
@@ -61,11 +102,10 @@ class DutyManager:
         env_jid = config.group_jid
         if not env_jid:
             return
-        state = self.runtime_state.read()
-        if state.get("group_jid") != env_jid:
+        if self.state.read().get("group_jid") != env_jid:
             def _mut(st: dict) -> None:
                 st["group_jid"] = env_jid
-            self.runtime_state.update(_mut)
+            self.state.update(_mut)
             logger.info("Auto-bound to group %s from config.", env_jid)
 
     # ── Date helpers ───────────────────────────────────────
@@ -83,30 +123,68 @@ class DutyManager:
     def bind_group(self, group_jid: str) -> None:
         def _mut(st: dict) -> None:
             st["group_jid"] = group_jid
-        self.runtime_state.update(_mut)
+        self.state.update(_mut)
         logger.info("Bot bound to group %s", group_jid)
 
     def get_group(self) -> Optional[str]:
-        return self.runtime_state.read().get("group_jid")
+        return self.state.read().get("group_jid")
 
     # ── Queue management ───────────────────────────────────
 
     def get_next_duty(self) -> Optional[str]:
-        queue = self.duty_list.read().get("queue", [])
+        queue = self.state.read().get("queue", [])
         return queue[0] if queue else None
 
     def add_to_queue(self, user_base: str) -> bool:
         added = False
-        def _mut(dt: dict) -> None:
+        def _mut(st: dict) -> None:
             nonlocal added
-            if user_base not in dt["queue"]:
-                dt["queue"].append(user_base)
+            if user_base not in st["queue"]:
+                st["queue"].append(user_base)
                 added = True
-        self.duty_list.update(_mut)
+        self.state.update(_mut)
         return added
 
     def get_queue(self) -> list[str]:
-        return self.duty_list.read().get("queue", [])
+        return self.state.read().get("queue", [])
+
+    def get_queue_with_dates(self, limit: int = 10) -> list[dict]:
+        """Calculates dates for the next users in the queue, skipping Sundays."""
+        queue = self.get_queue()
+        if not queue:
+            return []
+
+        results = []
+        today = datetime.now(TZ)
+        current_date = today
+
+        days_ukr = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+
+        for i, user in enumerate(queue[:limit]):
+            if current_date.weekday() == 6:
+                current_date += timedelta(days=1)
+
+            results.append({
+                "date": current_date.strftime("%d.%m"),
+                "day": days_ukr[current_date.weekday()],
+                "user": user,
+                "is_today": i == 0 and current_date.date() == today.date()
+            })
+
+            current_date += timedelta(days=1)
+
+        return results
+
+    def remove_from_queue(self, user_phone: str) -> bool:
+        """Removes a user from the queue by their phone number."""
+        removed = False
+        def _mut(st: dict) -> None:
+            nonlocal removed
+            if user_phone in st["queue"]:
+                st["queue"].remove(user_phone)
+                removed = True
+        self.state.update(_mut)
+        return removed
 
     # ── Duty confirmation ──────────────────────────────────
 
@@ -114,16 +192,17 @@ class DutyManager:
         if self.is_sunday():
             return False, msg.SUNDAY_NO_DUTY
 
-        state = self.runtime_state.read()
-        if state.get("current_duty") == user_base:
-            def _mut(st: dict) -> None:
-                st["confirmed_today"] = True
-            self.runtime_state.update(_mut)
+        st = self.state.read()
+        logger.info("confirm_duty: current_duty=%r caller=%r", st.get("current_duty"), user_base)
+        if st.get("current_duty") == user_base:
+            def _mut(s: dict) -> None:
+                s["confirmed_today"] = True
+            self.state.update(_mut)
             return True, msg.DUTY_CONFIRMED
         return False, msg.NOT_YOUR_DUTY
 
     def get_guilty(self) -> list[dict]:
-        return self.guilty.read().get("records", [])
+        return self.state.read().get("guilty_records", [])
 
     # ── Daily lifecycle ────────────────────────────────────
 
@@ -137,73 +216,62 @@ class DutyManager:
             return None
 
         today = self.get_current_date_str()
-        state = self.runtime_state.read()
+        st = self.state.read()
 
-        # Guard: already started today (e.g. bot restarted mid-day)
-        if state.get("last_start_date") == today:
+        if st.get("last_start_date") == today:
             logger.info("start_day already ran for %s, skipping.", today)
-            return state.get("current_duty")
+            return None
 
         next_user = self.get_next_duty()
         if next_user:
-            def _mut(st: dict) -> None:
-                st["current_duty"] = next_user
-                st["confirmed_today"] = False
-                st["last_start_date"] = today
-            self.runtime_state.update(_mut)
+            def _mut(s: dict) -> None:
+                s["current_duty"] = next_user
+                s["confirmed_today"] = False
+                s["last_start_date"] = today
+            self.state.update(_mut)
         return next_user
 
     def is_confirmed_today(self) -> bool:
-        return self.runtime_state.read().get("confirmed_today", True)
+        return self.state.read().get("confirmed_today", False)
 
     def get_current_assigned(self) -> Optional[str]:
-        return self.runtime_state.read().get("current_duty")
+        return self.state.read().get("current_duty")
 
     # ── End-of-day rotation ────────────────────────────────
 
     def rotate_and_penalize(self) -> None:
-        """Penalize if unconfirmed, rotate queue, reset state.
+        """Penalize if unconfirmed, rotate queue, reset state — atomically.
 
-        Guarded by ``last_rotation_date`` to avoid double rotation on
-        restart.  All three stores are written together to stay consistent.
+        Single update() call: one lock, one fsync, no partial-write risk.
+        Guarded by ``last_rotation_date`` to avoid double rotation on restart.
         """
         if self.is_sunday():
             return
 
         today = self.get_current_date_str()
-        state = self.runtime_state.read()
 
         # Guard: already rotated today
-        if state.get("last_rotation_date") == today:
+        if self.state.read().get("last_rotation_date") == today:
             logger.info("rotate_and_penalize already ran for %s, skipping.", today)
             return
 
-        confirmed = state.get("confirmed_today", True)
-        current_duty = state.get("current_duty")
-
-        # 1. Penalize if not confirmed
-        if not confirmed and current_duty:
-            def _pg(g: dict) -> None:
-                g["records"].append({
+        def _mutate(st: dict) -> None:
+            # 1. Penalize if not confirmed
+            if not st.get("confirmed_today", False) and st.get("current_duty"):
+                st["guilty_records"].append({
                     "date": today,
-                    "user": current_duty,
+                    "user": st["current_duty"],
                 })
-            self.guilty.update(_pg)
-            logger.info("Penalized %s for missing duty on %s.", current_duty, today)
+                logger.info("Penalized %s for missing duty on %s.", st["current_duty"], today)
 
-        # 2. Rotate queue
-        def _rotate(dt: dict) -> None:
-            if dt["queue"]:
-                first = dt["queue"].pop(0)
-                dt["queue"].append(first)
-        self.duty_list.update(_rotate)
+            # 2. Rotate queue
+            if st["queue"]:
+                st["queue"].append(st["queue"].pop(0))
 
-        # 3. Reset state with new duty + rotation date
-        new_duty = self.get_next_duty()
-        def _reset(st: dict) -> None:
+            # 3. Reset state — current_duty is set fresh by start_day next morning
+            st["current_duty"] = None
             st["confirmed_today"] = False
-            st["current_duty"] = new_duty
             st["last_rotation_date"] = today
-        self.runtime_state.update(_reset)
 
-        logger.info("Rotated queue. New head: %s", new_duty)
+        self.state.update(_mutate)
+        logger.info("Rotated queue. New head: %s", self.get_next_duty())

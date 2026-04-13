@@ -12,11 +12,8 @@ import sys
 import time
 
 # Load .env BEFORE anything else reads os.environ
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # python-dotenv is optional
+from dotenv import load_dotenv
+load_dotenv()
 
 from config import config
 from services.utils import get_logger
@@ -56,6 +53,7 @@ def run() -> None:
     # 5. Scheduler (reads times from config/.env)
     scheduler = BotScheduler(duty_manager, wa_client)
     scheduler.start()
+    wa_client.on_ready = scheduler.catchup
 
     # 6. Connect with auto-reconnect
     while True:

@@ -9,27 +9,29 @@ from __future__ import annotations
 
 # ── Scheduler / automatic messages ─────────────────────────
 MORNING_ANNOUNCEMENT = (
-    "Доброго ранку! Сьогодні черговий: @{user}\n"
-    "Натисніть кнопку по завершенню."
+    "Доброго раночку! Сьогодні черговий: @{user}"
 )
 
 REMINDER = "Нагадування для @{user}: Ви ще не завершили чергування!"
 
-SUNDAY_MESSAGE = "Сьогодні неділя — вихідний. 🌞"
+SUNDAY_MESSAGE = "Сьогодні неділя — вихідний, а може й ні. 🌞"
 
 # ── Command responses ──────────────────────────────────────
 GROUP_BOUND = "✅ Ця група прикріплена для чергувань."
 
-ADDED_TO_QUEUE = "✅ Вас додано до черги!"
-ALREADY_IN_QUEUE = "Ви вже в черзі."
-ADD_USAGE = "Вкажіть свій номер телефону:\n/add 380663644854"
-ADD_INVALID_PHONE = "❌ Невірний формат номера.\nПриклад: /add 380663644854"
+ADDED_TO_QUEUE = "✅ Додано до черги!"
+ALREADY_IN_QUEUE = "Вже в черзі."
+ADD_USAGE = "Вкажіть свій номер телефону:\n/add 380xxxxxxxxx"
+ADD_INVALID_PHONE = "❌ Невірний формат номера /add 380xxxxxxxxx"
+REMOVED_FROM_QUEUE = "✅ Користувача @{user} видалено з черги."
+NOT_IN_QUEUE = "Користувача @{user} немає в черзі."
+REMOVE_USAGE = "Вкажіть номер телефону контакту:\n/remove 380xxxxxxxxx"
 
 QUEUE_EMPTY = "Черга порожня."
 QUEUE_HEADER = "Поточна черга:"
 
-GUILTY_EMPTY = "Порушників немає. 🎉"
-GUILTY_HEADER = "Список порушників:"
+GUILTY_EMPTY = "Шкодників немає. 🎉"
+GUILTY_HEADER = "Список шкодників:"
 
 DUTY_CONFIRMED = "✅ Чергування підтверджено!"
 NOT_YOUR_DUTY = "Ви не є черговим сьогодні."

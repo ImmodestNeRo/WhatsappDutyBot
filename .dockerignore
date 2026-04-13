@@ -3,6 +3,10 @@ __pycache__/
 *.pyo
 *.pyd
 
+.venv/
+venv/
+env/
+
 .env
 .git
 .gitignore
@@ -13,3 +17,5 @@ session.db
 docker-compose.yml
 Dockerfile
 Gemini.md
+to_do.md
+*.md

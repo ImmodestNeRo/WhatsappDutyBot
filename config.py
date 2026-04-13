@@ -42,14 +42,18 @@ class BotConfig:
     timezone: str = field(default_factory=lambda: _env("TIMEZONE", "Europe/Kyiv"))
 
     # ── Schedule (HH:MM format) ────────────────────────────
+    # schedule_morning: str = field(default_factory=lambda: _env("SCHEDULE_MORNING", "08:00"))
+    # schedule_reminder_1: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_1", "14:00"))
+    # schedule_reminder_2: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_2", "17:30"))
+    # schedule_end_of_day: str = field(default_factory=lambda: _env("SCHEDULE_END_OF_DAY", "23:59"))
     schedule_morning: str = field(default_factory=lambda: _env("SCHEDULE_MORNING", "08:00"))
     schedule_reminder_1: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_1", "14:00"))
     schedule_reminder_2: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_2", "17:30"))
     schedule_end_of_day: str = field(default_factory=lambda: _env("SCHEDULE_END_OF_DAY", "23:59"))
 
+
     # ── History-sync grace period (seconds) ────────────────
     history_sync_grace: int = field(default_factory=lambda: _env_int("HISTORY_SYNC_GRACE", 60))
-
     # ── Logging ────────────────────────────────────────────
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
     log_max_bytes: int = field(default_factory=lambda: _env_int("LOG_MAX_BYTES", 10_485_760))  # 10 MB
@@ -59,8 +63,13 @@ class BotConfig:
 
     def parse_time(self, value: str) -> tuple[int, int]:
         """Parse 'HH:MM' string into (hour, minute) tuple."""
+        if not value or ":" not in value:
+            return 0, 0
         parts = value.split(":")
-        return int(parts[0]), int(parts[1])
+        try:
+            return int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            return 0, 0
 
     @property
     def session_db_path(self) -> str:
