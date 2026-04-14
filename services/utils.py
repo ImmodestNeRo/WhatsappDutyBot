@@ -1,5 +1,5 @@
 """
-Shared utilities: logging setup and retry decorator.
+Shared utilities: logging setup, retry decorator, rate limiter.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict, deque
 from logging.handlers import RotatingFileHandler
 from typing import Any, Callable, TypeVar
 
@@ -57,6 +58,40 @@ def get_logger(name: str) -> logging.Logger:
     """Return a named logger. Ensures logging is configured first."""
     setup_logging()
     return logging.getLogger(name)
+
+
+class RateLimiter:
+    """Sliding-window rate limiter. Thread-safe for single-process bots.
+
+    Example: RateLimiter(max_calls=5, window=60) allows 5 commands per minute per user.
+    On violation returns False; the caller decides whether to warn or silently ignore.
+    Repeated violations (warn_once=True) only produce one warning per window.
+    """
+
+    def __init__(self, max_calls: int, window: int) -> None:
+        self.max_calls = max_calls
+        self.window = window
+        self._history: dict[str, deque] = defaultdict(deque)
+        self._warned: dict[str, float] = {}
+
+    def is_allowed(self, user_id: str) -> bool:
+        now = time.monotonic()
+        q = self._history[user_id]
+        while q and q[0] < now - self.window:
+            q.popleft()
+        if len(q) >= self.max_calls:
+            return False
+        q.append(now)
+        return True
+
+    def should_warn(self, user_id: str) -> bool:
+        """True only on the first violation within a window (warn once)."""
+        now = time.monotonic()
+        last = self._warned.get(user_id, 0.0)
+        if now - last > self.window:
+            self._warned[user_id] = now
+            return True
+        return False
 
 
 def with_retry(max_retries: int = 3, delay: float = 5.0) -> Callable[[F], F]:

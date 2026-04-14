@@ -67,7 +67,7 @@ class BotScheduler:
             if user:
                 text = msg.MORNING_ANNOUNCEMENT.format(user=user)
                 logger.info("Morning announcement for user %s in group %s", user, gid)
-                self.wa.send_done_button(gid, text)
+                self.wa.send_done_button(gid, text, mentions=[user])
             else:
                 logger.info("Morning job: start_day() skipped (Sunday, already ran today, or empty queue).")
         except Exception as exc:
@@ -88,7 +88,7 @@ class BotScheduler:
                 if user:
                     text = msg.REMINDER.format(user=user)
                     logger.info("Sending reminder to %s for user %s", gid, user)
-                    self.wa.send_done_button(gid, text)
+                    self.wa.send_done_button(gid, text, mentions=[user])
                 else:
                     logger.warning("Reminder job: no current_duty assigned (morning job may have skipped).")
         except Exception as exc:

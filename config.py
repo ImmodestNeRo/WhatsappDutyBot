@@ -52,9 +52,18 @@ class BotConfig:
     schedule_end_of_day: str = field(default_factory=lambda: _env("SCHEDULE_END_OF_DAY", "23:59"))
 
 
+    # ── Admin phones (comma-separated) ──────────────────────
+    admin_phones: list[str] = field(default_factory=lambda: [
+        p.strip() for p in _env("ADMIN_PHONES", "").split(",") if p.strip()
+    ])
+
     # ── Queue constraints ──────────────────────────────────
     # Phone number that must always remain last in the queue.
     queue_always_last: str = field(default_factory=lambda: _env("QUEUE_ALWAYS_LAST", ""))
+
+    # ── Rate limiting ──────────────────────────────────────
+    rate_limit_calls: int = field(default_factory=lambda: _env_int("RATE_LIMIT_CALLS", 5))
+    rate_limit_window: int = field(default_factory=lambda: _env_int("RATE_LIMIT_WINDOW", 60))
 
     # ── History-sync grace period (seconds) ────────────────
     history_sync_grace: int = field(default_factory=lambda: _env_int("HISTORY_SYNC_GRACE", 60))

@@ -22,7 +22,7 @@ from neonize.utils.enum import VoteType
 
 from config import config
 from .duty import DutyManager
-from .utils import get_logger, with_retry
+from .utils import get_logger, with_retry, RateLimiter
 from . import messages as msg
 
 logger = get_logger("WhatsAppService")
@@ -42,15 +42,30 @@ class WhatsAppClient:
         self.client.event(ConnectedEv)(self.on_connected)
         self.client.event(DisconnectedEv)(self.on_disconnected)
 
+        self._rate_limiter = RateLimiter(
+            max_calls=config.rate_limit_calls,
+            window=config.rate_limit_window,
+        )
+
         # Command dispatch table
         self._handlers: dict[str, Callable] = {
-            "/bind_group": self._cmd_bind_group,
-            "/add":        self._cmd_add,
-            "/remove":     self._cmd_remove,
-            "/list":       self._cmd_list,
-            "/longlist":   self._cmd_longlist,
-            "/guilty":     self._cmd_guilty,
-            "/done":       self._cmd_done,
+            "/bind_group":  self._cmd_bind_group,
+            "/add":         self._cmd_add,
+            "/remove":      self._cmd_remove,
+            "/remove-q":    self._cmd_clear_queue,
+            "/remove-g":    self._cmd_clear_guilty,
+            "/list":        self._cmd_list,
+            "/longlist":    self._cmd_longlist,
+            "/guilty":      self._cmd_guilty,
+            "/done":        self._cmd_done,
+            "/help":        self._cmd_help,
+            "/admins-list": self._cmd_admins_list,
+        }
+
+        # Commands that require admin privileges
+        self._admin_commands: set[str] = {
+            "/bind_group", "/remove", "/remove-q", "/remove-g",
+            "/longlist", "/admins-list",
         }
 
     # ── Event handlers ─────────────────────────────────────
@@ -130,11 +145,30 @@ class WhatsAppClient:
         self.client.send_message(self._parse_jid(jid), text)
 
     @with_retry(max_retries=3)
-    def send_done_button(self, jid: str, text_content: str) -> None:
-        """Send a plain text message instructing the user to use /done."""
-        logger.info("Sending simple text notification to %s", jid)
-        message = f"{text_content}\n\n👉 Напишіть /done коли закінчите."
-        self.send_text(jid, message)
+    def send_mentioned_text(self, jid: str, text: str, mentions: list[str]) -> None:
+        """Send text with proper WhatsApp @mentions."""
+        mention_jids = [f"{m}@s.whatsapp.net" for m in mentions]
+        ctx = pb.ContextInfo()
+        for mj in mention_jids:
+            ctx.mentionedJID.append(mj)
+        message = pb.Message(
+            extendedTextMessage=pb.ExtendedTextMessage(
+                text=text,
+                contextInfo=ctx,
+            )
+        )
+        logger.info("Sending mentioned text to %s (mentions: %s)", jid, mentions)
+        self.client.send_message(self._parse_jid(jid), message)
+
+    @with_retry(max_retries=3)
+    def send_done_button(self, jid: str, text_content: str, mentions: list[str] | None = None) -> None:
+        """Send a notification with /done hint. Uses mentions if provided."""
+        logger.info("Sending notification to %s", jid)
+        full_text = f"{text_content}\n\n👉 Напишіть /done коли закінчите."
+        if mentions:
+            self.send_mentioned_text(jid, full_text, mentions)
+        else:
+            self.send_text(jid, full_text)
 
     # ── Incoming message handler ───────────────────────────
 
@@ -220,32 +254,66 @@ class WhatsAppClient:
 
         return text if text else None
 
-    def _get_user_from_command(self, text: str, message: MessageEv) -> Optional[str]:
-        """
-        Extracts a phone number from the command, either from a mention
-        or from a direct numeric string.
-        """
-        # 1. Check for mentions in contextInfo
+    def _get_mentions(self, message: MessageEv) -> list[str]:
+        """Extract mentioned phone numbers from WhatsApp mentions."""
+        phones: list[str] = []
         try:
             raw_msg = getattr(message, "Message", None)
             ext = getattr(raw_msg, "extendedTextMessage", None)
-            if ext and ext.contextInfo and ext.contextInfo.mentionedJid:
-                mention_jid = ext.contextInfo.mentionedJid[0]
-                parts = mention_jid.split("@")
-                user = parts[0]
-                server = parts[1] if len(parts) > 1 else "s.whatsapp.net"
-                return self._resolve_phone(user, server)
+            if ext and ext.contextInfo and ext.contextInfo.mentionedJID:
+                for jid in ext.contextInfo.mentionedJID:
+                    parts = jid.split("@")
+                    user = parts[0]
+                    server = parts[1] if len(parts) > 1 else "s.whatsapp.net"
+                    phone = self._resolve_phone(user, server)
+                    if phone:
+                        phones.append(phone)
         except Exception as exc:
-            logger.debug("Failed to extract mention: %s", exc)
+            logger.debug("Failed to extract mentions: %s", exc)
+        return phones
 
-        # 2. Check for manual phone number in text
-        parts = text.strip().split(maxsplit=1)
-        if len(parts) >= 2:
-            phone = parts[1].strip().lstrip("+").replace("-", "").replace(" ", "")
-            if phone.isdigit() and len(phone) >= 10:
-                return phone
-
+    @staticmethod
+    def _parse_phone(raw: str) -> Optional[str]:
+        """Validate and normalize a single phone number string."""
+        phone = raw.strip().lstrip("+").replace("-", "").replace(" ", "").lstrip("@")
+        if phone.isdigit() and 10 <= len(phone) <= 15:
+            return phone
         return None
+
+    def _get_users_from_command(self, text: str, message: MessageEv) -> list[str]:
+        """Extract phone numbers from mentions and/or text arguments."""
+        # 1. Mentions take priority
+        phones = self._get_mentions(message)
+        if phones:
+            return phones
+
+        # 2. Parse phone numbers from text arguments
+        parts = text.strip().split()
+        for arg in parts[1:]:
+            phone = self._parse_phone(arg)
+            if phone:
+                phones.append(phone)
+        return phones
+
+    def _has_args(self, text: str, message: MessageEv) -> bool:
+        """Check if the command has any arguments (text or mentions)."""
+        if len(text.strip().split()) > 1:
+            return True
+        return bool(self._get_mentions(message))
+
+    # ── Admin helpers ──────────────────────────────────────
+
+    def _resolve_sender_phone(self, sender: object) -> Optional[str]:
+        """Resolve sender object to a phone number string."""
+        sender_user: str = getattr(sender, "User", "")
+        sender_server: str = getattr(sender, "Server", "s.whatsapp.net")
+        return self._resolve_phone(sender_user, sender_server)
+
+    def _is_admin(self, sender: object) -> bool:
+        if not config.admin_phones:
+            return True  # no admins configured → everyone is admin
+        phone = self._resolve_sender_phone(sender)
+        return phone in config.admin_phones if phone else False
 
     # ── Command dispatch ───────────────────────────────────
 
@@ -254,9 +322,22 @@ class WhatsAppClient:
         parts = text.strip().split(maxsplit=1)
         if not parts:
             return
-        handler = self._handlers.get(parts[0])
-        if handler:
-            handler(text, chat_jid, sender, message)
+        cmd = parts[0].lower()
+        if cmd not in self._handlers:
+            return
+
+        user_id = f"{getattr(sender, 'User', '')}@{getattr(sender, 'Server', '')}"
+        if not self._rate_limiter.is_allowed(user_id):
+            if self._rate_limiter.should_warn(user_id):
+                self.send_text(chat_jid, msg.RATE_LIMITED)
+                logger.warning("Rate limit hit by %s", user_id)
+            return
+
+        if cmd in self._admin_commands and not self._is_admin(sender):
+            self.send_text(chat_jid, msg.NOT_ADMIN)
+            return
+
+        self._handlers[cmd](text, chat_jid, sender, message)
 
     # ── Command handlers ───────────────────────────────────
 
@@ -265,31 +346,53 @@ class WhatsAppClient:
         self.send_text(chat_jid, msg.GROUP_BOUND)
 
     def _cmd_add(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
-        phone = self._get_user_from_command(text, message)
+        if not self._has_args(text, message):
+            # Self-add: no arguments → add the sender
+            phone = self._resolve_sender_phone(sender)
+            if phone:
+                if self.duty_manager.add_to_queue(phone):
+                    self.send_text(chat_jid, msg.ADDED_TO_QUEUE)
+                else:
+                    self.send_text(chat_jid, msg.ALREADY_IN_QUEUE)
+            else:
+                self.send_text(chat_jid, msg.ADD_USAGE)
+            return
 
-        if not phone:
-            sender_user: str = getattr(sender, "User", "")
-            sender_server: str = getattr(sender, "Server", "s.whatsapp.net")
-            phone = self._resolve_phone(sender_user, sender_server)
+        # Adding others requires admin
+        if not self._is_admin(sender):
+            self.send_text(chat_jid, msg.NOT_ADMIN)
+            return
 
-        if phone:
-            if self.duty_manager.add_to_queue(phone):
+        phones = self._get_users_from_command(text, message)
+        if not phones:
+            self.send_text(chat_jid, msg.ADD_INVALID_PHONE)
+            return
+
+        if len(phones) == 1:
+            if self.duty_manager.add_to_queue(phones[0]):
                 self.send_text(chat_jid, msg.ADDED_TO_QUEUE)
             else:
                 self.send_text(chat_jid, msg.ALREADY_IN_QUEUE)
         else:
-            self.send_text(chat_jid, msg.ADD_USAGE)
+            results = []
+            for phone in phones:
+                if self.duty_manager.add_to_queue(phone):
+                    results.append(f"✅ @{phone}")
+                else:
+                    results.append(f"⏭ @{phone} — вже в черзі")
+            self.send_text(chat_jid, "\n".join(results))
 
     def _cmd_remove(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
-        phone = self._get_user_from_command(text, message)
+        phones = self._get_users_from_command(text, message)
+        if not phones:
+            self.send_text(chat_jid, msg.REMOVE_USAGE)
+            return
 
-        if phone:
+        for phone in phones:
             if self.duty_manager.remove_from_queue(phone):
                 self.send_text(chat_jid, msg.REMOVED_FROM_QUEUE.format(user=phone))
             else:
                 self.send_text(chat_jid, msg.NOT_IN_QUEUE.format(user=phone))
-        else:
-            self.send_text(chat_jid, msg.REMOVE_USAGE)
 
     def _cmd_list(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         queue_data = self.duty_manager.get_queue_with_dates(limit=10)
@@ -333,6 +436,28 @@ class WhatsAppClient:
         )
         success, response_text = self.duty_manager.confirm_duty(caller_phone)
         self.send_text(chat_jid, response_text)
+
+    def _cmd_clear_queue(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        self.duty_manager.clear_queue()
+        self.send_text(chat_jid, msg.QUEUE_CLEARED)
+
+    def _cmd_clear_guilty(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        self.duty_manager.clear_guilty()
+        self.send_text(chat_jid, msg.GUILTY_CLEARED)
+
+    def _cmd_help(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        lines = [msg.HELP_HEADER, "", *msg.HELP_PUBLIC]
+        if self._is_admin(sender):
+            lines += ["", *msg.HELP_ADMIN]
+        self.send_text(chat_jid, "\n".join(lines))
+
+    def _cmd_admins_list(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        admins = config.admin_phones
+        if not admins:
+            self.send_text(chat_jid, msg.NO_ADMINS_CONFIGURED)
+        else:
+            lines = [msg.ADMINS_HEADER] + [f"• @{a}" for a in admins]
+            self.send_mentioned_text(chat_jid, "\n".join(lines), admins)
 
     # ── Connection ─────────────────────────────────────────
 

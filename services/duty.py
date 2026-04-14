@@ -205,6 +205,20 @@ class DutyManager:
         self.state.update(_mut)
         return removed
 
+    def clear_queue(self) -> None:
+        def _mut(st: dict) -> None:
+            st["queue"] = []
+            st["current_duty"] = None
+            st["confirmed_today"] = False
+        self.state.update(_mut)
+        logger.info("Queue cleared.")
+
+    def clear_guilty(self) -> None:
+        def _mut(st: dict) -> None:
+            st["guilty_records"] = []
+        self.state.update(_mut)
+        logger.info("Guilty records cleared.")
+
     # ── Duty confirmation ──────────────────────────────────
 
     def confirm_duty(self, user_base: str) -> tuple[bool, str]:
