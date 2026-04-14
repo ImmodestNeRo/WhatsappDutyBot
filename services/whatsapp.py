@@ -9,7 +9,6 @@ WhatsApp client: event handling, message parsing, command dispatch.
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Callable, Optional
 
@@ -18,8 +17,6 @@ from neonize.client import NewClient
 from neonize.events import ConnectedEv, DisconnectedEv, MessageEv, QREv
 import neonize.proto.waE2E.WAWebProtobufsE2E_pb2 as pb
 import neonize.proto.Neonize_pb2 as neonize_pb
-from neonize.utils.enum import VoteType
-
 from config import config
 from .duty import DutyManager
 from .utils import get_logger, with_retry, RateLimiter
@@ -60,12 +57,13 @@ class WhatsAppClient:
             "/done":        self._cmd_done,
             "/help":        self._cmd_help,
             "/admins-list": self._cmd_admins_list,
+            "/trigger":     self._cmd_trigger,
         }
 
         # Commands that require admin privileges
         self._admin_commands: set[str] = {
             "/bind_group", "/remove", "/remove-q", "/remove-g",
-            "/longlist", "/admins-list",
+            "/longlist", "/admins-list", "/trigger",
         }
 
     # ── Event handlers ─────────────────────────────────────
@@ -75,7 +73,7 @@ class WhatsAppClient:
         for code in event.Codes:
             qr = segno.make(code)
             print("\n")
-            qr.terminal()
+            qr.terminal(compact=True)
             print("\n")
 
     def on_connected(self, client: NewClient, event: ConnectedEv) -> None:
@@ -231,27 +229,6 @@ class WhatsAppClient:
             if ext:
                 text = getattr(ext, "text", "")
 
-        # Button response
-        if not text:
-            inter = getattr(raw_msg, "interactiveResponseMessage", None)
-            if inter:
-                flow = getattr(inter, "nativeFlowResponseMessage", None)
-                if flow:
-                    p_json = getattr(flow, "paramsJSON", "{}")
-                    try:
-                        parsed = json.loads(p_json)
-                        if parsed.get("id") == "cmd_done":
-                            text = "/done"
-                    except (json.JSONDecodeError, KeyError) as exc:
-                        logger.debug("Failed to parse button response: %s", exc)
-
-        # Poll response fallback
-        if not text:
-            poll_update = getattr(raw_msg, "pollUpdateMessage", None)
-            if poll_update:
-                logger.info("Received a poll vote! Interpreting as confirmation.")
-                text = "/done"
-
         return text if text else None
 
     def _get_mentions(self, message: MessageEv) -> list[str]:
@@ -275,7 +252,7 @@ class WhatsAppClient:
     @staticmethod
     def _parse_phone(raw: str) -> Optional[str]:
         """Validate and normalize a single phone number string."""
-        phone = raw.strip().lstrip("+").replace("-", "").replace(" ", "").lstrip("@")
+        phone = raw.strip().lstrip("+").replace("-", "").replace(" ", "").replace(",", "").lstrip("@")
         if phone.isdigit() and 10 <= len(phone) <= 15:
             return phone
         return None
@@ -444,6 +421,14 @@ class WhatsAppClient:
     def _cmd_clear_guilty(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         self.duty_manager.clear_guilty()
         self.send_text(chat_jid, msg.GUILTY_CLEARED)
+
+    def _cmd_trigger(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        user = self.duty_manager.get_current_assigned()
+        if user:
+            text_out = msg.REMINDER.format(user=user)
+            self.send_done_button(chat_jid, text_out, mentions=[user])
+        else:
+            self.send_text(chat_jid, msg.NO_CURRENT_DUTY)
 
     def _cmd_help(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         lines = [msg.HELP_HEADER, "", *msg.HELP_PUBLIC]
