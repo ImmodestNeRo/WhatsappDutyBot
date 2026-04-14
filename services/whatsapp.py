@@ -9,6 +9,7 @@ WhatsApp client: event handling, message parsing, command dispatch.
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Callable, Optional
 
@@ -58,12 +59,14 @@ class WhatsAppClient:
             "/help":        self._cmd_help,
             "/admins-list": self._cmd_admins_list,
             "/trigger":     self._cmd_trigger,
+            "/rat":         self._cmd_rat,
+            "/swap":        self._cmd_swap,
         }
 
         # Commands that require admin privileges
         self._admin_commands: set[str] = {
             "/bind_group", "/remove", "/remove-q", "/remove-g",
-            "/longlist", "/admins-list", "/trigger",
+            "/longlist", "/admins-list", "/trigger", "/guilty",
         }
 
     # ── Event handlers ─────────────────────────────────────
@@ -399,9 +402,15 @@ class WhatsAppClient:
         records = self.duty_manager.get_guilty()
         if not records:
             self.send_text(chat_jid, msg.GUILTY_EMPTY)
-        else:
-            lines = [f"{r['date']}: @{r['user']}" for r in records]
-            self.send_text(chat_jid, f"{msg.GUILTY_HEADER}\n" + "\n".join(lines))
+            return
+
+        # Count per user
+        counts: dict[str, int] = {}
+        for r in records:
+            counts[r["user"]] = counts.get(r["user"], 0) + 1
+
+        lines = [f"@{user} — {count} пропуск(ів)" for user, count in counts.items()]
+        self.send_text(chat_jid, f"{msg.GUILTY_HEADER}\n" + "\n".join(lines))
 
     def _cmd_done(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         sender_user: str = getattr(sender, "User", "")
@@ -423,7 +432,7 @@ class WhatsAppClient:
         self.send_text(chat_jid, msg.GUILTY_CLEARED)
 
     def _cmd_trigger(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
-        user = self.duty_manager.get_current_assigned()
+        user = self.duty_manager.get_current_assigned() or self.duty_manager.get_next_duty()
         if user:
             text_out = msg.REMINDER.format(user=user)
             self.send_done_button(chat_jid, text_out, mentions=[user])
@@ -443,6 +452,22 @@ class WhatsAppClient:
         else:
             lines = [msg.ADMINS_HEADER] + [f"• @{a}" for a in admins]
             self.send_mentioned_text(chat_jid, "\n".join(lines), admins)
+
+    # ── Fun commands ───────────────────────────────────────
+
+    def _cmd_rat(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        queue = self.duty_manager.get_queue()
+        if not queue:
+            self.send_text(chat_jid, msg.QUEUE_EMPTY)
+            return
+        victim = random.choice(queue)
+        text_out = random.choice(msg.RAT_MESSAGES).format(user=victim)
+        self.send_mentioned_text(chat_jid, text_out, [victim])
+
+    def _cmd_swap(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        self.send_text(chat_jid, msg.SWAP_REQUEST)
+        time.sleep(1.5)
+        self.send_text(chat_jid, msg.SWAP_DENIED)
 
     # ── Connection ─────────────────────────────────────────
 
