@@ -53,6 +53,10 @@ def setup_logging() -> None:
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
 
+    # ── Quiet noisy third-party loggers ────────────────────
+    for noisy in ("whatsmeow", "apscheduler", "neonize"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 def get_logger(name: str) -> logging.Logger:
     """Return a named logger. Ensures logging is configured first."""
