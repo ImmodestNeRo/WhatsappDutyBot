@@ -456,17 +456,22 @@ class WhatsAppClient:
     # ── Fun commands ───────────────────────────────────────
 
     def _cmd_rat(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
-        # Try explicit target: mention or single phone arg
+        admins = set(config.admin_phones)
+
         phones = self._get_users_from_command(text, message)
         if phones:
             victim = phones[0]
+            if victim in admins:
+                self.send_text(chat_jid, msg.RAT_ADMIN_PROTECTED)
+                return
         else:
-            # No argument — pick random from queue
-            queue = self.duty_manager.get_queue()
+            # No argument — pick random non-admin from queue
+            queue = [u for u in self.duty_manager.get_queue() if u not in admins]
             if not queue:
                 self.send_text(chat_jid, msg.QUEUE_EMPTY)
                 return
             victim = random.choice(queue)
+
         text_out = random.choice(msg.RAT_MESSAGES).format(user=victim)
         self.send_mentioned_text(chat_jid, text_out, [victim])
 

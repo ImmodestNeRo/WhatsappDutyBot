@@ -29,8 +29,8 @@
 
 | Команда | Опис |
 |---------|------|
-| `/add <номер>` | Додати когось (можна кілька через пробіл або @згадки) |
-| `/remove <номер>` | Видалити з черги |
+| `/add <номер або @згадка>` | Додати когось (можна кілька через пробіл або @згадки) |
+| `/remove <номер або @згадка>` | Видалити з черги |
 | `/remove-q` | Очистити всю чергу |
 | `/remove-g` | Очистити список порушників |
 | `/guilty` | Список порушників з лічильником пропусків |
@@ -111,13 +111,25 @@ docker logs -f duty-bot
 ## Структура проєкту
 
 ```
-main.py                  — точка входу, auto-reconnect
-config.py                — конфігурація з .env
+main.py                  — точка входу, auto-reconnect цикл
+config.py                — конфігурація з .env (всі змінні)
+start.sh                 — entrypoint: seed черги в Volume при першому деплої
+bot_state.seed.json      — початковий стан черги для першого деплою
+Dockerfile               — збірка образу
+docker-compose.yml       — локальний запуск з Volume
+.env                     — змінні оточення (не комітити!)
+requirements.txt         — залежності Python
+
 services/
-  whatsapp.py            — WhatsApp-клієнт, обробка команд
-  duty.py                — бізнес-логіка черги
-  scheduler.py           — cron-задачі + catch-up
-  storage.py             — атомарний JSON-стейт
-  messages.py            — тексти повідомлень
-  utils.py               — логування, retry, rate limiter
+  whatsapp.py            — WhatsApp-клієнт, dispatch команд, відправка повідомлень
+  duty.py                — бізнес-логіка: черга, призначення, ротація, порушники
+  scheduler.py           — cron-задачі (ранок/нагадування/ротація) + catch-up при старті
+  storage.py             — атомарний JSON-стейт з блокуванням і fsync
+  messages.py            — всі тексти повідомлень бота
+  utils.py               — логування, retry-декоратор, rate limiter
+
+data/                    — директорія даних (не комітити!)
+  session.db             — WhatsApp-сесія
+  bot_state.json         — поточний стан черги і чергувань
+  logs/bot.log           — ротаційні логи
 ```
