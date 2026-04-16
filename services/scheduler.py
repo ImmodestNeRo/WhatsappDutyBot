@@ -36,7 +36,6 @@ class BotScheduler:
         self._add_job("morning",    config.schedule_morning,    self.job_morning)
         self._add_job("reminder_1", config.schedule_reminder_1, self.job_reminder)
         self._add_job("reminder_2", config.schedule_reminder_2, self.job_reminder)
-        self._add_job("end_of_day", config.schedule_end_of_day,  self.job_end_of_day)
 
     def _add_job(self, name: str, time_str: str, func) -> None:
         """Register a cron job and log its scheduled time clearly."""
@@ -57,10 +56,19 @@ class BotScheduler:
     # ── Jobs ───────────────────────────────────────────────
 
     def job_morning(self) -> None:
+        """Close yesterday's duty (rotate + penalize), then assign today's.
+
+        Each step has its own idempotency guard, so a restart mid-job
+        won't double-fire either half.
+        """
         try:
+            # 1. Close previous duty period (24 h window is over)
+            self.duty.rotate_and_penalize()
+
+            # 2. Assign today's duty
             gid = self.duty.get_group()
             if not gid:
-                logger.warning("Morning job skipped — no group bound.")
+                logger.warning("Morning job skipped announcement — no group bound.")
                 return
 
             user = self.duty.start_day()
@@ -94,38 +102,24 @@ class BotScheduler:
         except Exception as exc:
             logger.error("Error in reminder job: %s", exc, exc_info=True)
 
-    def job_end_of_day(self) -> None:
-        try:
-            self.duty.rotate_and_penalize()
-        except Exception as exc:
-            logger.error("Error in end-of-day job: %s", exc, exc_info=True)
-
     # ── Catch-up ───────────────────────────────────────────
 
     def catchup(self) -> None:
-        """Fire missed jobs after WhatsApp connects.
+        """Fire missed morning job after WhatsApp connects.
 
-        Order matters:
-        1. Close out a *previous* day if its end-of-day was missed
-           (morning ran that day but rotation never happened).
-        2. Catch up *today's* morning if it hasn't run yet.
-
-        End-of-day is NEVER caught up for the current day — the cron
-        job will handle it at the scheduled time.
+        The morning job itself handles both rotate_and_penalize() and
+        start_day(), each with its own idempotency guard. So a single
+        call here is enough to close any missed previous day AND assign
+        today's duty.
         """
+        if self.duty.is_sunday():
+            logger.info("Catch-up: Sunday — nothing to do.")
+            return
+
         now = datetime.now(self.tz)
         today = now.strftime("%Y-%m-%d")
         st = self.duty.state.read()
 
-        # 1. Previous day's missed end-of-day
-        last_start = st.get("last_start_date")
-        last_rot = st.get("last_rotation_date")
-        if last_start and last_start != today and last_rot != last_start:
-            logger.info("Catch-up: closing missed end-of-day for %s.", last_start)
-            self.job_end_of_day()
-
-        # 2. Today's morning
-        st = self.duty.state.read()
         h, m = config.parse_time(config.schedule_morning)
         if (now.hour, now.minute) >= (h, m) and st.get("last_start_date") != today:
             logger.info("Catch-up: firing morning job.")

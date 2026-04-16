@@ -42,14 +42,9 @@ class BotConfig:
     timezone: str = field(default_factory=lambda: _env("TIMEZONE", "Europe/Kyiv"))
 
     # ── Schedule (HH:MM format) ────────────────────────────
-    # schedule_morning: str = field(default_factory=lambda: _env("SCHEDULE_MORNING", "08:00"))
-    # schedule_reminder_1: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_1", "14:00"))
-    # schedule_reminder_2: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_2", "17:30"))
-    # schedule_end_of_day: str = field(default_factory=lambda: _env("SCHEDULE_END_OF_DAY", "23:59"))
     schedule_morning: str = field(default_factory=lambda: _env("SCHEDULE_MORNING", "08:00"))
     schedule_reminder_1: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_1", "14:00"))
     schedule_reminder_2: str = field(default_factory=lambda: _env("SCHEDULE_REMINDER_2", "17:30"))
-    schedule_end_of_day: str = field(default_factory=lambda: _env("SCHEDULE_END_OF_DAY", "23:59"))
 
 
     # ── Admin phones (comma-separated) ──────────────────────

@@ -272,10 +272,13 @@ class DutyManager:
     def get_current_assigned(self) -> Optional[str]:
         return self.state.read().get("current_duty")
 
-    # ── End-of-day rotation ────────────────────────────────
+    # ── Rotation (called each morning before start_day) ─────
 
     def rotate_and_penalize(self) -> None:
-        """Penalize if unconfirmed, rotate queue, reset state — atomically.
+        """Close previous duty period: penalize if unconfirmed, rotate queue.
+
+        Called at the beginning of each morning job, *before* ``start_day()``.
+        This gives the duty person a full 24 hours (08:00 → next 08:00).
 
         Single update() call: one lock, one fsync, no partial-write risk.
         Guarded by ``last_rotation_date`` to avoid double rotation on restart.
@@ -285,28 +288,42 @@ class DutyManager:
 
         today = self.get_current_date_str()
 
+        st = self.state.read()
+
         # Guard: already rotated today
-        if self.state.read().get("last_rotation_date") == today:
+        if st.get("last_rotation_date") == today:
             logger.info("rotate_and_penalize already ran for %s, skipping.", today)
             return
+
+        # Nothing to close if no duty was ever assigned
+        if not st.get("last_start_date"):
+            logger.info("rotate_and_penalize: no previous duty to close, skipping.")
+            # Still mark today so we don't re-enter on catchup
+            def _mark(s: dict) -> None:
+                s["last_rotation_date"] = today
+            self.state.update(_mark)
+            return
+
+        # The penalty date is the day the duty was assigned, not today
+        duty_date = st["last_start_date"]
 
         def _mutate(st: dict) -> None:
             # 1. Penalize if not confirmed
             if not st.get("confirmed_today", False) and st.get("current_duty"):
                 st["guilty_records"].append({
-                    "date": today,
+                    "date": duty_date,
                     "user": st["current_duty"],
                 })
-                logger.info("Penalized %s for missing duty on %s.", st["current_duty"], today)
+                logger.info("Penalized %s for missing duty on %s.", st["current_duty"], duty_date)
 
             # 2. Rotate queue
             if st["queue"]:
                 st["queue"].append(st["queue"].pop(0))
 
-            # 3. Reset state — current_duty is set fresh by start_day next morning
+            # 3. Reset state — current_duty is set fresh by start_day()
             st["current_duty"] = None
             st["confirmed_today"] = False
             st["last_rotation_date"] = today
 
         self.state.update(_mutate)
-        logger.info("Rotated queue. New head: %s", self.get_next_duty())
+        logger.info("Rotated queue (closed duty from %s). New head: %s", duty_date, self.get_next_duty())
