@@ -61,12 +61,16 @@ class WhatsAppClient:
             "/trigger":     self._cmd_trigger,
             "/rat":         self._cmd_rat,
             "/swap":        self._cmd_swap,
+            "/skip":        self._cmd_skip,
+            "/dogana":      self._cmd_dogana,
+            "/pardon":      self._cmd_pardon,
         }
 
         # Commands that require admin privileges
         self._admin_commands: set[str] = {
             "/bind_group", "/remove", "/remove-q", "/remove-g",
             "/longlist", "/admins-list", "/trigger", "/guilty",
+            "/skip", "/dogana", "/pardon",
         }
 
     # ── Event handlers ─────────────────────────────────────
@@ -374,29 +378,36 @@ class WhatsAppClient:
             else:
                 self.send_text(chat_jid, msg.NOT_IN_QUEUE.format(user=phone))
 
+    def _format_queue(self, queue_data: list[dict]) -> str:
+        lines = []
+        for item in queue_data:
+            prefix = "✅ " if item["is_today"] else "— "
+            suffix = " (Сьогодні)" if item["is_today"] else ""
+            if item.get("is_penalty"):
+                suffix += msg.PENALTY_SUFFIX
+            lines.append(f"{item['day']} ({item['date']}) {prefix}@{item['user']}{suffix}")
+
+        penalties = self.duty_manager.get_pending_penalties()
+        if penalties:
+            lines.append(msg.PENDING_PENALTIES_HEADER)
+            for user, count in penalties.items():
+                lines.append(f"  @{user} +{count}")
+
+        return f"{msg.QUEUE_HEADER}\n" + "\n".join(lines)
+
     def _cmd_list(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         queue_data = self.duty_manager.get_queue_with_dates(limit=10)
         if not queue_data:
             self.send_text(chat_jid, msg.QUEUE_EMPTY)
         else:
-            lines = []
-            for item in queue_data:
-                prefix = "✅ " if item["is_today"] else "— "
-                suffix = " (Сьогодні)" if item["is_today"] else ""
-                lines.append(f"{item['day']} ({item['date']}) {prefix}@{item['user']}{suffix}")
-            self.send_text(chat_jid, f"{msg.QUEUE_HEADER}\n" + "\n".join(lines))
+            self.send_text(chat_jid, self._format_queue(queue_data))
 
     def _cmd_longlist(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         queue_data = self.duty_manager.get_queue_with_dates(limit=None)
         if not queue_data:
             self.send_text(chat_jid, msg.QUEUE_EMPTY)
         else:
-            lines = []
-            for item in queue_data:
-                prefix = "✅ " if item["is_today"] else "— "
-                suffix = " (Сьогодні)" if item["is_today"] else ""
-                lines.append(f"{item['day']} ({item['date']}) {prefix}@{item['user']}{suffix}")
-            self.send_text(chat_jid, f"{msg.QUEUE_HEADER}\n" + "\n".join(lines))
+            self.send_text(chat_jid, self._format_queue(queue_data))
 
     def _cmd_guilty(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         records = self.duty_manager.get_guilty()
@@ -438,6 +449,44 @@ class WhatsAppClient:
             self.send_done_button(chat_jid, text_out, mentions=[user])
         else:
             self.send_text(chat_jid, msg.NO_CURRENT_DUTY)
+
+    def _cmd_skip(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        current = self.duty_manager.get_current_assigned()
+        if not current:
+            self.send_text(chat_jid, msg.SKIP_NO_DUTY)
+            return
+        new_duty = self.duty_manager.skip_current()
+        if new_duty:
+            text_out = msg.SKIP_DONE.format(skipped=current, new_duty=new_duty)
+            self.send_mentioned_text(chat_jid, text_out, [current, new_duty])
+        else:
+            self.send_text(chat_jid, msg.SKIP_NO_DUTY)
+
+    def _cmd_dogana(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        phones = self._get_users_from_command(text, message)
+        if not phones:
+            self.send_text(chat_jid, msg.DOGANA_USAGE)
+            return
+        for phone in phones:
+            if self.duty_manager.add_penalty(phone):
+                self.send_mentioned_text(
+                    chat_jid, msg.DOGANA_RECORDED.format(user=phone), [phone],
+                )
+            else:
+                self.send_text(chat_jid, msg.DOGANA_NOT_IN_QUEUE.format(user=phone))
+
+    def _cmd_pardon(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        phones = self._get_users_from_command(text, message)
+        if not phones:
+            self.send_text(chat_jid, msg.PARDON_USAGE)
+            return
+        for phone in phones:
+            if self.duty_manager.remove_penalty(phone):
+                self.send_mentioned_text(
+                    chat_jid, msg.PARDON_APPLIED.format(user=phone), [phone],
+                )
+            else:
+                self.send_text(chat_jid, msg.PARDON_NO_PENALTY.format(user=phone))
 
     def _cmd_help(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         lines = [msg.HELP_HEADER, "", *msg.HELP_PUBLIC]

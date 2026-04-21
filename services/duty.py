@@ -36,7 +36,41 @@ _DEFAULT_STATE: dict = {
     "last_rotation_date": None,
     "last_start_date": None,
     "group_jid": None,
+    "pending_penalties": {},
+    "cycle_anchor": None,
 }
+
+
+def _rebuild_queue(st: dict) -> None:
+    """Deduplicate queue and insert penalty slots for the new cycle."""
+    queue = st["queue"]
+    penalties = st.get("pending_penalties", {})
+    always_last = config.queue_always_last
+
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for user in queue:
+        if user not in seen:
+            seen.add(user)
+            unique.append(user)
+
+    # Insert penalty slots right after the user's main slot
+    new_queue: list[str] = []
+    for user in unique:
+        new_queue.append(user)
+        for _ in range(penalties.get(user, 0)):
+            new_queue.append(user)
+
+    # ALWAYS_LAST constraint: all their slots go to the end
+    if always_last and always_last in new_queue:
+        count = new_queue.count(always_last)
+        new_queue = [u for u in new_queue if u != always_last]
+        new_queue.extend([always_last] * count)
+
+    st["queue"] = new_queue
+    st["pending_penalties"] = {}
+    st["cycle_anchor"] = new_queue[0] if new_queue else None
 
 
 class DutyManager:
@@ -54,6 +88,7 @@ class DutyManager:
         # Auto-bind group from .env if not yet persisted
         self._auto_bind_group()
         self._enforce_queue_constraints()
+        self._ensure_cycle_anchor()
 
     # ── Migration ──────────────────────────────────────────
 
@@ -123,6 +158,15 @@ class DutyManager:
             self.state.update(_mut)
             logger.info("Queue constraint applied: %s moved to end.", always_last)
 
+    def _ensure_cycle_anchor(self) -> None:
+        """Set cycle_anchor on first run or after upgrade."""
+        st = self.state.read()
+        if not st.get("cycle_anchor") and st.get("queue"):
+            def _mut(s: dict) -> None:
+                s["cycle_anchor"] = s["queue"][0]
+            self.state.update(_mut)
+            logger.info("Cycle anchor initialized: %s", st["queue"][0])
+
     # ── Date helpers ───────────────────────────────────────
 
     @staticmethod
@@ -176,6 +220,7 @@ class DutyManager:
         results = []
         today = datetime.now(TZ)
         current_date = today
+        seen: set[str] = set()
 
         days_ukr = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 
@@ -183,11 +228,15 @@ class DutyManager:
             if current_date.weekday() == 6:
                 current_date += timedelta(days=1)
 
+            is_penalty = user in seen
+            seen.add(user)
+
             results.append({
                 "date": current_date.strftime("%d.%m"),
                 "day": days_ukr[current_date.weekday()],
                 "user": user,
-                "is_today": i == 0 and current_date.date() == today.date()
+                "is_today": i == 0 and current_date.date() == today.date(),
+                "is_penalty": is_penalty,
             })
 
             current_date += timedelta(days=1)
@@ -202,6 +251,8 @@ class DutyManager:
             if user_phone in st["queue"]:
                 st["queue"].remove(user_phone)
                 removed = True
+                if st.get("cycle_anchor") == user_phone:
+                    st["cycle_anchor"] = st["queue"][0] if st["queue"] else None
         self.state.update(_mut)
         return removed
 
@@ -210,6 +261,8 @@ class DutyManager:
             st["queue"] = []
             st["current_duty"] = None
             st["confirmed_today"] = False
+            st["pending_penalties"] = {}
+            st["cycle_anchor"] = None
         self.state.update(_mut)
         logger.info("Queue cleared.")
 
@@ -272,6 +325,79 @@ class DutyManager:
     def get_current_assigned(self) -> Optional[str]:
         return self.state.read().get("current_duty")
 
+    # ── Skip / penalty management ───────────────────────────
+
+    def skip_current(self) -> Optional[str]:
+        """Skip current duty person — move to end of queue, assign next.
+
+        Returns the new duty person, or None if no one to assign.
+        """
+        st = self.state.read()
+        current = st.get("current_duty")
+        if not current:
+            return None
+
+        new_duty: Optional[str] = None
+
+        def _mut(s: dict) -> None:
+            nonlocal new_duty
+            queue = s["queue"]
+            if current not in queue:
+                return
+
+            queue.remove(current)
+            queue.append(current)
+
+            # Update cycle_anchor if skipped person was the anchor
+            if s.get("cycle_anchor") == current:
+                s["cycle_anchor"] = queue[0] if queue else None
+
+            new_duty = queue[0] if queue else None
+            s["current_duty"] = new_duty
+            s["confirmed_today"] = False
+
+        self.state.update(_mut)
+        if new_duty:
+            logger.info("Skipped %s. New duty: %s", current, new_duty)
+        return new_duty
+
+    def add_penalty(self, user: str) -> bool:
+        """Manually record a penalty (dogana). Returns False if user not in queue."""
+        st = self.state.read()
+        unique_in_queue = set(st.get("queue", []))
+        if user not in unique_in_queue:
+            return False
+
+        today = self.get_current_date_str()
+
+        def _mut(s: dict) -> None:
+            penalties = s.setdefault("pending_penalties", {})
+            penalties[user] = penalties.get(user, 0) + 1
+            s["guilty_records"].append({"date": today, "user": user})
+
+        self.state.update(_mut)
+        logger.info("Manual penalty (dogana) for %s.", user)
+        return True
+
+    def remove_penalty(self, user: str) -> bool:
+        """Remove one pending penalty (pardon). Returns False if nothing to remove."""
+        st = self.state.read()
+        if st.get("pending_penalties", {}).get(user, 0) <= 0:
+            return False
+
+        def _mut(s: dict) -> None:
+            penalties = s.setdefault("pending_penalties", {})
+            penalties[user] = penalties.get(user, 0) - 1
+            if penalties[user] <= 0:
+                del penalties[user]
+
+        self.state.update(_mut)
+        logger.info("Pardon for %s — one penalty removed.", user)
+        return True
+
+    def get_pending_penalties(self) -> dict[str, int]:
+        return dict(self.state.read().get("pending_penalties", {}))
+
     # ── Rotation (called each morning before start_day) ─────
 
     def rotate_and_penalize(self) -> None:
@@ -310,17 +436,25 @@ class DutyManager:
         def _mutate(st: dict) -> None:
             # 1. Penalize if not confirmed
             if not st.get("confirmed_today", False) and st.get("current_duty"):
-                st["guilty_records"].append({
-                    "date": duty_date,
-                    "user": st["current_duty"],
-                })
-                logger.info("Penalized %s for missing duty on %s.", st["current_duty"], duty_date)
+                user = st["current_duty"]
+                st["guilty_records"].append({"date": duty_date, "user": user})
+                penalties = st.setdefault("pending_penalties", {})
+                penalties[user] = penalties.get(user, 0) + 1
+                logger.info("Penalized %s for missing duty on %s.", user, duty_date)
 
             # 2. Rotate queue
             if st["queue"]:
                 st["queue"].append(st["queue"].pop(0))
 
-            # 3. Reset state — current_duty is set fresh by start_day()
+            # 3. Cycle tracking
+            anchor = st.get("cycle_anchor")
+            if not anchor and st["queue"]:
+                st["cycle_anchor"] = st["queue"][0]
+            elif anchor and st["queue"] and st["queue"][0] == anchor:
+                _rebuild_queue(st)
+                logger.info("Cycle complete — rebuilt queue with penalties.")
+
+            # 4. Reset state — current_duty is set fresh by start_day()
             st["current_duty"] = None
             st["confirmed_today"] = False
             st["last_rotation_date"] = today
