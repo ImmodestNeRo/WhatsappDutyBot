@@ -347,10 +347,16 @@ class DutyManager:
 
             queue.remove(current)
             always_last = config.queue_always_last
-            if always_last and queue and queue[-1] == always_last:
-                queue.insert(len(queue) - 1, current)
+            if always_last and always_last in queue:
+                idx = queue.index(always_last)
+                queue.insert(idx, current)
             else:
                 queue.append(current)
+
+            # Enforce ALWAYS_LAST at the end
+            if always_last and always_last in queue and queue[-1] != always_last:
+                queue.remove(always_last)
+                queue.append(always_last)
 
             # Update cycle_anchor if skipped person was the anchor
             if s.get("cycle_anchor") == current:
