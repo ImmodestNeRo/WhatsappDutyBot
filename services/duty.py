@@ -346,7 +346,11 @@ class DutyManager:
                 return
 
             queue.remove(current)
-            queue.append(current)
+            always_last = config.queue_always_last
+            if always_last and queue and queue[-1] == always_last:
+                queue.insert(len(queue) - 1, current)
+            else:
+                queue.append(current)
 
             # Update cycle_anchor if skipped person was the anchor
             if s.get("cycle_anchor") == current:
@@ -390,6 +394,11 @@ class DutyManager:
             penalties[user] = penalties.get(user, 0) - 1
             if penalties[user] <= 0:
                 del penalties[user]
+            # Remove the latest guilty record for this user
+            for i in range(len(s["guilty_records"]) - 1, -1, -1):
+                if s["guilty_records"][i]["user"] == user:
+                    s["guilty_records"].pop(i)
+                    break
 
         self.state.update(_mut)
         logger.info("Pardon for %s — one penalty removed.", user)
