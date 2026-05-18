@@ -263,6 +263,11 @@ class DutyManager:
             st["confirmed_today"] = False
             st["pending_penalties"] = {}
             st["cycle_anchor"] = None
+            # Скидаємо дати — щоб після /remove-q + /add
+            # start_day() і rotate_and_penalize() не думали,
+            # що вже щось відбулося сьогодні.
+            st["last_start_date"] = None
+            st["last_rotation_date"] = None
         self.state.update(_mut)
         logger.info("Queue cleared.")
 
@@ -279,12 +284,17 @@ class DutyManager:
             return False, msg.SUNDAY_NO_DUTY
 
         st = self.state.read()
-        logger.info("confirm_duty: current_duty=%r caller=%r", st.get("current_duty"), user_base)
-        if st.get("current_duty") == user_base:
+        # Fallback: якщо current_duty не призначений (наприклад, після /remove-q),
+        # дозволяємо підтвердити першому в черзі — симетрично до /trigger.
+        current = st.get("current_duty") or (st["queue"][0] if st.get("queue") else None)
+        logger.info("confirm_duty: current_duty=%r resolved=%r caller=%r", st.get("current_duty"), current, user_base)
+        if current == user_base:
             if st.get("confirmed_today"):
                 return False, msg.DUTY_ALREADY_CONFIRMED
             def _mut(s: dict) -> None:
                 s["confirmed_today"] = True
+                if not s.get("current_duty"):
+                    s["current_duty"] = user_base
             self.state.update(_mut)
             return True, msg.DUTY_CONFIRMED
         return False, msg.NOT_YOUR_DUTY
@@ -457,8 +467,10 @@ class DutyManager:
                 penalties[user] = penalties.get(user, 0) + 1
                 logger.info("Penalized %s for missing duty on %s.", user, duty_date)
 
-            # 2. Rotate queue
-            if st["queue"]:
+            # 2. Rotate queue — тільки якщо хтось був офіційно призначений.
+            # Якщо current_duty=None (наприклад, після /remove-q без нового start_day),
+            # ротувати нікого: перший у черзі залишається на місці.
+            if st["queue"] and st.get("current_duty"):
                 st["queue"].append(st["queue"].pop(0))
 
             # 3. Cycle tracking

@@ -329,6 +329,15 @@ class WhatsAppClient:
         self.duty_manager.bind_group(chat_jid)
         self.send_text(chat_jid, msg.GROUP_BOUND)
 
+    def _maybe_assign_duty(self, chat_jid: str) -> None:
+        """Призначити чергового, якщо current_duty порожній після /add."""
+        if self.duty_manager.get_current_assigned():
+            return
+        user = self.duty_manager.start_day()
+        if user:
+            text = msg.MORNING_ANNOUNCEMENT.format(user=user)
+            self.send_done_button(chat_jid, text, mentions=[user])
+
     def _cmd_add(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         if not self._has_args(text, message):
             # Self-add: no arguments → add the sender
@@ -336,6 +345,7 @@ class WhatsAppClient:
             if phone:
                 if self.duty_manager.add_to_queue(phone):
                     self.send_text(chat_jid, msg.ADDED_TO_QUEUE)
+                    self._maybe_assign_duty(chat_jid)
                 else:
                     self.send_text(chat_jid, msg.ALREADY_IN_QUEUE)
             else:
@@ -355,6 +365,7 @@ class WhatsAppClient:
         if len(phones) == 1:
             if self.duty_manager.add_to_queue(phones[0]):
                 self.send_text(chat_jid, msg.ADDED_TO_QUEUE)
+                self._maybe_assign_duty(chat_jid)
             else:
                 self.send_text(chat_jid, msg.ALREADY_IN_QUEUE)
         else:
@@ -365,6 +376,7 @@ class WhatsAppClient:
                 else:
                     results.append(f"⏭ @{phone} — вже в черзі")
             self.send_text(chat_jid, "\n".join(results))
+            self._maybe_assign_duty(chat_jid)
 
     def _cmd_remove(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         phones = self._get_users_from_command(text, message)
