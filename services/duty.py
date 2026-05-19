@@ -263,13 +263,28 @@ class DutyManager:
             st["confirmed_today"] = False
             st["pending_penalties"] = {}
             st["cycle_anchor"] = None
-            # Скидаємо дати — щоб після /remove-q + /add
-            # start_day() і rotate_and_penalize() не думали,
-            # що вже щось відбулося сьогодні.
             st["last_start_date"] = None
             st["last_rotation_date"] = None
         self.state.update(_mut)
         logger.info("Queue cleared.")
+
+    def rebuild_queue(self) -> None:
+        """Clear queue for rebuilding while preserving rotation state.
+
+        Unlike clear_queue(), keeps last_start_date and last_rotation_date
+        so tomorrow's rotate_and_penalize() runs correctly without skipping.
+        cycle_anchor is reset to None and will be re-initialized to the new
+        queue[0] on the next rotation or restart.
+        """
+        def _mut(st: dict) -> None:
+            st["queue"] = []
+            st["current_duty"] = None
+            st["confirmed_today"] = False
+            st["pending_penalties"] = {}
+            st["cycle_anchor"] = None
+            # last_start_date and last_rotation_date are intentionally preserved
+        self.state.update(_mut)
+        logger.info("Queue cleared for rebuild (rotation dates preserved).")
 
     def clear_guilty(self) -> None:
         def _mut(st: dict) -> None:
@@ -467,14 +482,21 @@ class DutyManager:
                 penalties[user] = penalties.get(user, 0) + 1
                 logger.info("Penalized %s for missing duty on %s.", user, duty_date)
 
-            # 2. Rotate queue — тільки якщо хтось був офіційно призначений.
-            # Якщо current_duty=None (наприклад, після /remove-q без нового start_day),
-            # ротувати нікого: перший у черзі залишається на місці.
+            # 2. Rotate queue — move current_duty to the end.
+            # We rotate current_duty explicitly (not queue[0]) because they can
+            # diverge after /remove + /add on the duty person: queue[0] would be
+            # the wrong person and that person would get an undeserved extra slot.
             if st["queue"] and st.get("current_duty"):
-                st["queue"].append(st["queue"].pop(0))
+                current = st["current_duty"]
+                if current in st["queue"]:
+                    st["queue"].remove(current)
+                    st["queue"].append(current)
 
             # 3. Cycle tracking
             anchor = st.get("cycle_anchor")
+            if anchor and anchor not in st["queue"]:
+                anchor = None
+                st["cycle_anchor"] = None
             if not anchor and st["queue"]:
                 st["cycle_anchor"] = st["queue"][0]
             elif anchor and st["queue"] and st["queue"][0] == anchor:

@@ -51,6 +51,7 @@ class WhatsAppClient:
             "/add":         self._cmd_add,
             "/remove":      self._cmd_remove,
             "/remove-q":    self._cmd_clear_queue,
+            "/rebuild-q":   self._cmd_rebuild_queue,
             "/remove-g":    self._cmd_clear_guilty,
             "/list":        self._cmd_list,
             "/longlist":    self._cmd_longlist,
@@ -68,7 +69,7 @@ class WhatsAppClient:
 
         # Commands that require admin privileges
         self._admin_commands: set[str] = {
-            "/bind_group", "/remove", "/remove-q", "/remove-g",
+            "/bind_group", "/remove", "/remove-q", "/rebuild-q", "/remove-g",
             "/longlist", "/admins-list", "/trigger", "/guilty",
             "/skip", "/dogana", "/pardon",
         }
@@ -449,6 +450,10 @@ class WhatsAppClient:
     def _cmd_clear_queue(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         self.duty_manager.clear_queue()
         self.send_text(chat_jid, msg.QUEUE_CLEARED)
+
+    def _cmd_rebuild_queue(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        self.duty_manager.rebuild_queue()
+        self.send_text(chat_jid, msg.QUEUE_REBUILT)
 
     def _cmd_clear_guilty(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         self.duty_manager.clear_guilty()
