@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 import time
 from typing import Callable, Optional
 
@@ -78,6 +79,9 @@ class WhatsAppClient:
     # ── Event handlers ─────────────────────────────────────
 
     def on_qr(self, client: NewClient, event: QREv) -> None:
+        if config.whatsapp_phone:
+            threading.Thread(target=self._pair_with_phone, daemon=True).start()
+            return
         sep = "=" * 60
         qr_path = os.path.join(config.data_dir, "qr.png")
         print(f"\n{sep}")
@@ -90,13 +94,19 @@ class WhatsAppClient:
             qr.terminal(compact=True)
             print()
         print(f"{sep}\n")
-        logger.warning("QR CODE REQUIRED — зайдіть на Railway → Logs і відскануйте QR. PNG збережено: %s", qr_path)
-        if config.telegram_token and config.telegram_chat_id:
-            send_telegram_alert(
-                config.telegram_token,
-                config.telegram_chat_id,
-                "🔐 DutyBot: потрібен QR-код!\n\nЗайдіть на Railway → сервіс → Logs і відскануйте QR через WhatsApp → Linked Devices.",
-            )
+        logger.warning("QR CODE REQUIRED — зайдіть на Railway → Logs і відскануйте QR.")
+
+    def _pair_with_phone(self) -> None:
+        try:
+            code = self.client.PairPhone(config.whatsapp_phone, False)
+            sep = "=" * 60
+            print(f"\n{sep}")
+            print(f"  PAIRING CODE: {code}")
+            print(f"  WhatsApp → Linked Devices → Link with phone number")
+            print(f"{sep}\n")
+            logger.warning("PAIRING CODE: %s", code)
+        except Exception as e:
+            logger.error("PairPhone failed: %s", e)
 
     def on_connected(self, client: NewClient, event: ConnectedEv) -> None:
         logger.info("WhatsApp connected successfully.")

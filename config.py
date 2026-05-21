@@ -60,6 +60,10 @@ class BotConfig:
     rate_limit_calls: int = field(default_factory=lambda: _env_int("RATE_LIMIT_CALLS", 5))
     rate_limit_window: int = field(default_factory=lambda: _env_int("RATE_LIMIT_WINDOW", 60))
 
+    # ── WhatsApp phone pairing (optional) ─────────────────
+    # Set to enable phone-number pairing instead of QR (e.g. "380671234567")
+    whatsapp_phone: str = field(default_factory=lambda: _env("WHATSAPP_PHONE", ""))
+
     # ── Telegram alerts (optional) ─────────────────────────
     telegram_token: str = field(default_factory=lambda: _env("TELEGRAM_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
