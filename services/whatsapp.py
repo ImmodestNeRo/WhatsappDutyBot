@@ -97,6 +97,14 @@ class WhatsAppClient:
         logger.warning("QR CODE REQUIRED — зайдіть на Railway → Logs і відскануйте QR.")
 
     def _pair_with_phone(self) -> None:
+        # Short delay so the websocket stabilises before PairPhone fires.
+        # Without this, on a reconnect (existing session) the socket closes
+        # before the info query returns, causing a spurious error.
+        time.sleep(3)
+        session_path = config.session_db_path
+        if os.path.exists(session_path) and os.path.getsize(session_path) > 0:
+            logger.debug("Session file exists — skipping PairPhone (reconnect, not fresh auth).")
+            return
         try:
             code = self.client.PairPhone(config.whatsapp_phone, False)
             sep = "=" * 60
