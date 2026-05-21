@@ -60,6 +60,10 @@ class BotConfig:
     rate_limit_calls: int = field(default_factory=lambda: _env_int("RATE_LIMIT_CALLS", 5))
     rate_limit_window: int = field(default_factory=lambda: _env_int("RATE_LIMIT_WINDOW", 60))
 
+    # ── Telegram alerts (optional) ─────────────────────────
+    telegram_token: str = field(default_factory=lambda: _env("TELEGRAM_TOKEN", ""))
+    telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
+
     # ── History-sync grace period (seconds) ────────────────
     history_sync_grace: int = field(default_factory=lambda: _env_int("HISTORY_SYNC_GRACE", 60))
     # ── Logging ────────────────────────────────────────────

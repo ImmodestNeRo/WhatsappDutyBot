@@ -9,6 +9,7 @@ WhatsApp client: event handling, message parsing, command dispatch.
 
 from __future__ import annotations
 
+import os
 import random
 import time
 from typing import Callable, Optional
@@ -20,7 +21,7 @@ import neonize.proto.waE2E.WAWebProtobufsE2E_pb2 as pb
 import neonize.proto.Neonize_pb2 as neonize_pb
 from config import config
 from .duty import DutyManager
-from .utils import get_logger, with_retry, RateLimiter
+from .utils import get_logger, with_retry, RateLimiter, send_telegram_alert
 from . import messages as msg
 
 logger = get_logger("WhatsAppService")
@@ -77,12 +78,25 @@ class WhatsAppClient:
     # ── Event handlers ─────────────────────────────────────
 
     def on_qr(self, client: NewClient, event: QREv) -> None:
-        logger.info("QR CODE RECEIVED — scan with your WhatsApp!")
+        sep = "=" * 60
+        qr_path = os.path.join(config.data_dir, "qr.png")
+        print(f"\n{sep}")
+        print("  QR CODE — відскануйте через WhatsApp → Linked Devices")
+        print(sep)
         for code in event.Codes:
             qr = segno.make(code)
-            print("\n")
+            qr.save(qr_path, scale=10, border=2)
+            print()
             qr.terminal(compact=True)
-            print("\n")
+            print()
+        print(f"{sep}\n")
+        logger.warning("QR CODE REQUIRED — зайдіть на Railway → Logs і відскануйте QR. PNG збережено: %s", qr_path)
+        if config.telegram_token and config.telegram_chat_id:
+            send_telegram_alert(
+                config.telegram_token,
+                config.telegram_chat_id,
+                "🔐 DutyBot: потрібен QR-код!\n\nЗайдіть на Railway → сервіс → Logs і відскануйте QR через WhatsApp → Linked Devices.",
+            )
 
     def on_connected(self, client: NewClient, event: ConnectedEv) -> None:
         logger.info("WhatsApp connected successfully.")
@@ -105,6 +119,12 @@ class WhatsAppClient:
 
     def on_disconnected(self, client: NewClient, event: DisconnectedEv) -> None:
         logger.warning("WhatsApp session disconnected!")
+        if config.telegram_token and config.telegram_chat_id:
+            send_telegram_alert(
+                config.telegram_token,
+                config.telegram_chat_id,
+                "⚠️ DutyBot розлогінено з WhatsApp!\n\nПотрібен QR-код: зайдіть на Railway → сервіс → Logs.",
+            )
 
     # ── JID helpers ────────────────────────────────────────
 

@@ -5,10 +5,12 @@ Shared utilities: logging setup, retry decorator, rate limiter.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import sys
 import time
+import urllib.request
 from collections import defaultdict, deque
 from logging.handlers import RotatingFileHandler
 from typing import Any, Callable, TypeVar
@@ -96,6 +98,22 @@ class RateLimiter:
             self._warned[user_id] = now
             return True
         return False
+
+
+def send_telegram_alert(token: str, chat_id: str, text: str) -> None:
+    """Send a Telegram message. Silently swallows errors (non-critical)."""
+    try:
+        data = json.dumps({"chat_id": chat_id, "text": text}).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception as exc:
+        logging.getLogger("TelegramAlert").warning("Telegram alert failed: %s", exc)
 
 
 def with_retry(max_retries: int = 3, delay: float = 5.0) -> Callable[[F], F]:
