@@ -22,10 +22,15 @@ import neonize.proto.waE2E.WAWebProtobufsE2E_pb2 as pb
 import neonize.proto.Neonize_pb2 as neonize_pb
 from config import config
 from .duty import DutyManager
-from .utils import get_logger, with_retry, RateLimiter, send_telegram_alert
+from .utils import get_logger, with_retry, RateLimiter, DailyLimiter
 from . import messages as msg
 
 logger = get_logger("WhatsAppService")
+
+# Loss probability for a non-admin caller who duels themselves (house always wins).
+DUEL_LOSE_BIAS = 0.70
+# Daily /duel cap for non-admins.
+DUEL_DAILY_LIMIT = 3
 
 
 class WhatsAppClient:
@@ -42,10 +47,14 @@ class WhatsAppClient:
         self.client.event(ConnectedEv)(self.on_connected)
         self.client.event(DisconnectedEv)(self.on_disconnected)
 
+        self._connected: bool = False
+        self._disconnected_at: float = 0.0
+
         self._rate_limiter = RateLimiter(
             max_calls=config.rate_limit_calls,
             window=config.rate_limit_window,
         )
+        self._duel_limiter = DailyLimiter(max_per_day=DUEL_DAILY_LIMIT)
 
         # Command dispatch table
         self._handlers: dict[str, Callable] = {
@@ -64,6 +73,8 @@ class WhatsAppClient:
             "/trigger":     self._cmd_trigger,
             "/rat":         self._cmd_rat,
             "/swap":        self._cmd_swap,
+            "/duel":        self._cmd_duel,
+            "/excuse":      self._cmd_excuse,
             "/skip":        self._cmd_skip,
             "/dogana":      self._cmd_dogana,
             "/pardon":      self._cmd_pardon,
@@ -117,6 +128,8 @@ class WhatsAppClient:
             logger.error("PairPhone failed: %s", e)
 
     def on_connected(self, client: NewClient, event: ConnectedEv) -> None:
+        self._connected = True
+        self._disconnected_at = 0.0
         logger.info("WhatsApp connected successfully.")
         try:
             me = client.get_me()
@@ -128,21 +141,22 @@ class WhatsAppClient:
         except Exception as exc:
             logger.warning("Could not resolve own JID: %s", exc)
 
+        # Fire catch-up on every (re)connect, not just the first. It is fully
+        # idempotent (guarded by last_rotation_date / last_start_date /
+        # announced_date), so re-running is safe and lets a deferred
+        # announcement be delivered once the connection is back.
         if self.on_ready:
             try:
                 self.on_ready()
-                self.on_ready = None  # fire once only
             except Exception as exc:
                 logger.error("Catch-up error: %s", exc, exc_info=True)
 
     def on_disconnected(self, client: NewClient, event: DisconnectedEv) -> None:
+        self._connected = False
+        self._disconnected_at = time.time()
         logger.warning("WhatsApp session disconnected!")
-        if config.telegram_token and config.telegram_chat_id:
-            send_telegram_alert(
-                config.telegram_token,
-                config.telegram_chat_id,
-                "⚠️ DutyBot розлогінено з WhatsApp!\n\nПотрібен QR-код: зайдіть на Railway → сервіс → Logs.",
-            )
+        # No alert here: most disconnects auto-reconnect within ~1s. A real
+        # sustained outage is reported once by the watchdog in main.py.
 
     # ── JID helpers ────────────────────────────────────────
 
@@ -583,6 +597,49 @@ class WhatsAppClient:
         self.send_text(chat_jid, msg.SWAP_REQUEST)
         time.sleep(1.5)
         self.send_text(chat_jid, msg.SWAP_DENIED)
+
+    def _cmd_duel(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        caller = self._resolve_sender_phone(sender)
+        participants = self._get_users_from_command(text, message)
+
+        # One mention → caller vs that person. Two+ → first two of them.
+        if len(participants) == 1 and caller:
+            p1, p2 = caller, participants[0]
+        elif len(participants) >= 2:
+            p1, p2 = participants[0], participants[1]
+        else:
+            self.send_text(chat_jid, msg.DUEL_USAGE)
+            return
+
+        if p1 == p2:
+            self.send_text(chat_jid, msg.DUEL_SELF)
+            return
+
+        # Non-admins get 3 duels per day.
+        is_admin = self._is_admin(sender)
+        if not is_admin:
+            today = self.duty_manager.get_current_date_str()
+            if not self._duel_limiter.check_and_increment(caller or "", today):
+                self.send_text(chat_jid, msg.DUEL_LIMIT)
+                return
+
+        # Bias: a non-admin who duels themselves is more likely to lose.
+        if not is_admin and caller in (p1, p2):
+            other = p2 if caller == p1 else p1
+            loser = caller if random.random() < DUEL_LOSE_BIAS else other
+        else:
+            loser = random.choice([p1, p2])
+        winner = p2 if loser == p1 else p1
+
+        intro = random.choice(msg.DUEL_INTRO).format(a=p1, b=p2)
+        self.send_mentioned_text(chat_jid, intro, [p1, p2])
+        time.sleep(1.5)
+        result = random.choice(msg.DUEL_RESULT).format(winner=winner, loser=loser)
+        self.send_mentioned_text(chat_jid, result, [winner, loser])
+
+    def _cmd_excuse(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
+        excuse = random.choice(msg.EXCUSE_MESSAGES)
+        self.send_text(chat_jid, f"{msg.EXCUSE_HEADER}\n{excuse}")
 
     # ── Connection ─────────────────────────────────────────
 

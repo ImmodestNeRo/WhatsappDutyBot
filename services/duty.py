@@ -38,6 +38,7 @@ _DEFAULT_STATE: dict = {
     "group_jid": None,
     "pending_penalties": {},
     "cycle_anchor": None,
+    "announced_date": None,
 }
 
 
@@ -265,6 +266,7 @@ class DutyManager:
             st["cycle_anchor"] = None
             st["last_start_date"] = None
             st["last_rotation_date"] = None
+            st["announced_date"] = None
         self.state.update(_mut)
         logger.info("Queue cleared.")
 
@@ -347,6 +349,27 @@ class DutyManager:
     def is_confirmed_today(self) -> bool:
         return self.state.read().get("confirmed_today", False)
 
+    def mark_announced(self) -> None:
+        """Record that today's duty announcement was actually delivered."""
+        today = self.get_current_date_str()
+        def _mut(s: dict) -> None:
+            s["announced_date"] = today
+        self.state.update(_mut)
+
+    def needs_announcement(self) -> Optional[str]:
+        """Return the duty user assigned today but not yet announced, else None.
+
+        Lets the morning announcement survive a WhatsApp outage: if sending
+        failed (or was deferred) the announcement is re-sent on reconnect.
+        """
+        if self.is_sunday():
+            return None
+        today = self.get_current_date_str()
+        st = self.state.read()
+        if st.get("last_start_date") == today and st.get("announced_date") != today:
+            return st.get("current_duty")
+        return None
+
     def get_current_assigned(self) -> Optional[str]:
         return self.state.read().get("current_duty")
 
@@ -415,16 +438,34 @@ class DutyManager:
         return True
 
     def remove_penalty(self, user: str) -> bool:
-        """Remove one pending penalty (pardon). Returns False if nothing to remove."""
+        """Remove one penalty (pardon). Returns False if nothing to remove.
+
+        A penalty can live in two places:
+          1. ``pending_penalties`` — accrued this cycle, not yet in the queue.
+          2. A materialized duplicate slot already inserted into the queue by
+             ``_rebuild_queue`` at the previous cycle boundary (this is what
+             ``/list`` marks ``⚠️ штрафний``).
+        Pardon clears whichever exists, preferring a pending penalty first.
+        """
         st = self.state.read()
-        if st.get("pending_penalties", {}).get(user, 0) <= 0:
+        has_pending = st.get("pending_penalties", {}).get(user, 0) > 0
+        has_slot = st.get("queue", []).count(user) > 1
+        if not has_pending and not has_slot:
             return False
 
         def _mut(s: dict) -> None:
-            penalties = s.setdefault("pending_penalties", {})
-            penalties[user] = penalties.get(user, 0) - 1
-            if penalties[user] <= 0:
-                del penalties[user]
+            if s.get("pending_penalties", {}).get(user, 0) > 0:
+                penalties = s["pending_penalties"]
+                penalties[user] = penalties.get(user, 0) - 1
+                if penalties[user] <= 0:
+                    del penalties[user]
+            else:
+                # Drop one materialized penalty slot — the last occurrence,
+                # so the user's primary/active slot is left untouched.
+                for i in range(len(s["queue"]) - 1, -1, -1):
+                    if s["queue"][i] == user:
+                        s["queue"].pop(i)
+                        break
             # Remove the latest guilty record for this user
             for i in range(len(s["guilty_records"]) - 1, -1, -1):
                 if s["guilty_records"][i]["user"] == user:

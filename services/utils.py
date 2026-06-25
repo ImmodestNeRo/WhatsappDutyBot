@@ -100,6 +100,35 @@ class RateLimiter:
         return False
 
 
+class DailyLimiter:
+    """Per-user daily counter. Resets automatically when the date changes.
+
+    In-memory only (a fun-command guard, not critical state): a process
+    restart clears counts. Pass the current date string on each call so the
+    caller controls the timezone.
+    """
+
+    def __init__(self, max_per_day: int) -> None:
+        self.max_per_day = max_per_day
+        self._data: dict[str, tuple[str, int]] = {}  # user -> (date, count)
+
+    def remaining(self, user: str, today: str) -> int:
+        date, count = self._data.get(user, (today, 0))
+        if date != today:
+            count = 0
+        return max(0, self.max_per_day - count)
+
+    def check_and_increment(self, user: str, today: str) -> bool:
+        """Return True and consume one use, or False if the daily cap is hit."""
+        date, count = self._data.get(user, (today, 0))
+        if date != today:
+            count = 0
+        if count >= self.max_per_day:
+            return False
+        self._data[user] = (today, count + 1)
+        return True
+
+
 def send_telegram_alert(token: str, chat_id: str, text: str) -> None:
     """Send a Telegram message. Silently swallows errors (non-critical)."""
     try:

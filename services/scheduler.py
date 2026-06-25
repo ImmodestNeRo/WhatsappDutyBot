@@ -73,9 +73,7 @@ class BotScheduler:
 
             user = self.duty.start_day()
             if user:
-                text = msg.MORNING_ANNOUNCEMENT.format(user=user)
-                logger.info("Morning announcement for user %s in group %s", user, gid)
-                self.wa.send_done_button(gid, text, mentions=[user])
+                self._send_morning_announcement(gid, user)
             elif self.duty.is_sunday():
                 logger.info("Morning job: Sunday — sending day-off message.")
                 self.wa.send_text(gid, msg.SUNDAY_MESSAGE)
@@ -83,6 +81,22 @@ class BotScheduler:
                 logger.info("Morning job: start_day() skipped (already ran today or empty queue).")
         except Exception as exc:
             logger.error("Error in morning job: %s", exc, exc_info=True)
+
+    def _send_morning_announcement(self, gid: str, user: str) -> None:
+        """Announce today's duty. Defers (does not mark) if WhatsApp is offline.
+
+        ``mark_announced()`` runs only on a successful send, so a deferred or
+        failed announcement is re-sent on reconnect via ``catchup()``.
+        """
+        if not getattr(self.wa, "_connected", True):
+            logger.warning(
+                "WhatsApp offline — morning announcement for %s deferred to reconnect.", user
+            )
+            return
+        text = msg.MORNING_ANNOUNCEMENT.format(user=user)
+        logger.info("Morning announcement for user %s in group %s", user, gid)
+        self.wa.send_done_button(gid, text, mentions=[user])
+        self.duty.mark_announced()
 
     def job_reminder(self) -> None:
         try:
@@ -92,6 +106,10 @@ class BotScheduler:
                 return
 
             if self.duty.is_sunday():
+                return
+
+            if not getattr(self.wa, "_connected", True):
+                logger.warning("Reminder job skipped — WhatsApp offline.")
                 return
 
             if not self.duty.is_confirmed_today():
@@ -127,6 +145,16 @@ class BotScheduler:
         if (now.hour, now.minute) >= (h, m) and st.get("last_start_date") != today:
             logger.info("Catch-up: firing morning job.")
             self.job_morning()
+            return
+
+        # Morning already ran today, but the announcement may have been
+        # deferred/failed while WhatsApp was offline — re-send it now.
+        pending = self.duty.needs_announcement()
+        if pending:
+            gid = self.duty.get_group()
+            if gid:
+                logger.info("Catch-up: re-sending deferred announcement for %s.", pending)
+                self._send_morning_announcement(gid, pending)
 
     # ── Lifecycle ──────────────────────────────────────────
 

@@ -16,12 +16,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import config
-from services.utils import get_logger
+from services.utils import get_logger, send_telegram_alert
 from services.duty import DutyManager
 from services.whatsapp import WhatsAppClient
 from services.scheduler import BotScheduler
 
 logger = get_logger("Main")
+
+
+def _outage_alert(text: str) -> None:
+    """Out-of-band alert for a real WhatsApp outage (can't notify via WhatsApp
+    when WhatsApp itself is down). No-op unless Telegram is configured."""
+    if config.telegram_token and config.telegram_chat_id:
+        send_telegram_alert(config.telegram_token, config.telegram_chat_id, text)
 
 
 def run() -> None:
@@ -55,6 +62,10 @@ def run() -> None:
     scheduler.start()
     wa_client.on_ready = scheduler.catchup
 
+    # If neonize auto-reconnect fires but takes longer than this, force a full reconnect.
+    RECONNECT_WATCHDOG = 90  # seconds
+    outage_alerted = False  # ensures the outage alert fires at most once per outage
+
     # 6. Connect with auto-reconnect
     while True:
         try:
@@ -62,9 +73,29 @@ def run() -> None:
             wa_client.connect()
             logger.info("Connected. Listening for events…")
 
-            # Keep alive
+            # Keep alive; watchdog exits inner loop when neonize auto-reconnect fails.
             while True:
-                time.sleep(1)
+                time.sleep(5)
+                if not wa_client._connected and wa_client._disconnected_at > 0:
+                    elapsed = time.time() - wa_client._disconnected_at
+                    if elapsed > RECONNECT_WATCHDOG:
+                        if not outage_alerted:
+                            logger.error("Sustained WhatsApp outage (%.0f s).", elapsed)
+                            _outage_alert(
+                                "⚠️ DutyBot втратив зв'язок з WhatsApp більш ніж на "
+                                f"{RECONNECT_WATCHDOG} с і не може автоматично перепідключитися.\n\n"
+                                "Можливо, потрібен повторний QR-код: Railway → сервіс → Logs."
+                            )
+                            outage_alerted = True
+                        logger.warning(
+                            "No auto-reconnect for %.0f s — forcing reconnect.", elapsed
+                        )
+                        break
+                elif wa_client._connected and outage_alerted:
+                    # Recovered after a real outage — report once.
+                    logger.info("WhatsApp connection recovered after outage.")
+                    _outage_alert("✅ DutyBot відновив зв'язок з WhatsApp.")
+                    outage_alerted = False
 
         except KeyboardInterrupt:
             logger.info("Shutting down gracefully.")
