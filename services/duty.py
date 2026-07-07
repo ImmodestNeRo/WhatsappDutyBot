@@ -373,6 +373,26 @@ class DutyManager:
     def get_current_assigned(self) -> Optional[str]:
         return self.state.read().get("current_duty")
 
+    def transfer_duty(self, winner: str, loser: str) -> bool:
+        """Transfer today's duty to the duel loser.
+
+        Applies only when the current duty person is the winner and the
+        duty is not confirmed yet. The future queue is not touched.
+        Returns True if the transfer happened.
+        """
+        transferred = False
+
+        def _mut(s: dict) -> None:
+            nonlocal transferred
+            if s.get("current_duty") == winner and not s.get("confirmed_today"):
+                s["current_duty"] = loser
+                transferred = True
+
+        self.state.update(_mut)
+        if transferred:
+            logger.info("Duel: duty transferred from %s to %s", winner, loser)
+        return transferred
+
     # ── Skip / penalty management ───────────────────────────
 
     def skip_current(self) -> Optional[str]:

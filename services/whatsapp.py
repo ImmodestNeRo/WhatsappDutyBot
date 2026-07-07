@@ -637,6 +637,11 @@ class WhatsAppClient:
         result = random.choice(msg.DUEL_RESULT).format(winner=winner, loser=loser)
         self.send_mentioned_text(chat_jid, result, [winner, loser])
 
+        # Loser takes over today's duty if the duty person won the duel.
+        if self.duty_manager.transfer_duty(winner, loser):
+            time.sleep(1.0)
+            self.send_mentioned_text(chat_jid, msg.DUEL_TRANSFER.format(loser=loser), [loser])
+
     def _cmd_excuse(self, text: str, chat_jid: str, sender: object, message: MessageEv) -> None:
         excuse = random.choice(msg.EXCUSE_MESSAGES)
         self.send_text(chat_jid, f"{msg.EXCUSE_HEADER}\n{excuse}")
