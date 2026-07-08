@@ -377,20 +377,31 @@ class DutyManager:
         """Transfer today's duty to the duel loser.
 
         Applies only when the current duty person is the winner and the
-        duty is not confirmed yet. The future queue is not touched.
+        duty is not confirmed yet. Swaps winner and loser in the queue so
+        that /list, /skip, and rotate_and_penalize all see loser as today.
         Returns True if the transfer happened.
         """
         transferred = False
 
         def _mut(s: dict) -> None:
             nonlocal transferred
-            if s.get("current_duty") == winner and not s.get("confirmed_today"):
-                s["current_duty"] = loser
-                transferred = True
+            if s.get("current_duty") != winner or s.get("confirmed_today"):
+                return
+            s["current_duty"] = loser
+            queue = s["queue"]
+            if winner in queue and loser in queue:
+                wi, li = queue.index(winner), queue.index(loser)
+                queue[wi], queue[li] = queue[li], queue[wi]
+            elif winner in queue:
+                # loser not in queue — move winner to end, insert loser at front
+                queue.remove(winner)
+                queue.insert(0, loser)
+                queue.append(winner)
+            transferred = True
 
         self.state.update(_mut)
         if transferred:
-            logger.info("Duel: duty transferred from %s to %s", winner, loser)
+            logger.info("Duel: duty transferred from %s to %s (queue swapped)", winner, loser)
         return transferred
 
     # ── Skip / penalty management ───────────────────────────
